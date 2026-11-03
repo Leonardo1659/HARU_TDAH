@@ -1,0 +1,62 @@
+{
+  "texto": "¡Jajaja, eso me dio cosquillas! ¡Vamos súper bien con nuestra misión!",
+  "voz": "es-BO-SofiaNeural",
+  "velocidad": "+0%",
+  "marcas": [
+    {
+      "word": "Jajaja",
+      "offset_ms": 95,
+      "duration_ms": 443
+    },
+    {
+      "word": "eso",
+      "offset_ms": 731,
+      "duration_ms": 215
+    },
+    {
+      "word": "me",
+      "offset_ms": 959,
+      "duration_ms": 90
+    },
+    {
+      "word": "dio",
+      "offset_ms": 1061,
+      "duration_ms": 170
+    },
+    {
+      "word": "cosquillas",
+      "offset_ms": 1243,
+      "duration_ms": 681
+    },
+    {
+      "word": "Vamos",
+      "offset_ms": 2704,
+      "duration_ms": 295
+    },
+    {
+      "word": "súper",
+      "offset_ms": 3011,
+      "duration_ms": 284
+    },
+    {
+      "word": "bien",
+      "offset_ms": 3306,
+      "duration_ms": 227
+    },
+    {
+      "word": "con",
+      "offset_ms": 3545,
+      "duration_ms": 113
+    },
+    {
+      "word": "nuestra",
+      "offset_ms": 3670,
+      "duration_ms": 272
+    },
+    {
+      "word": "misión",
+      "offset_ms": 3954,
+      "duration_ms": 420
+    }
+  ]
+}

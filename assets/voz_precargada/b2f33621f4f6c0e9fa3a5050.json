@@ -1,0 +1,72 @@
+{
+  "texto": "¡Tiempo de concentración cumplido! Descansa 3 minutos: levántate, estira los brazos o toma agüita.",
+  "voz": "es-BO-SofiaNeural",
+  "velocidad": "+0%",
+  "marcas": [
+    {
+      "word": "Tiempo",
+      "offset_ms": 95,
+      "duration_ms": 295
+    },
+    {
+      "word": "de",
+      "offset_ms": 402,
+      "duration_ms": 90
+    },
+    {
+      "word": "concentración",
+      "offset_ms": 504,
+      "duration_ms": 693
+    },
+    {
+      "word": "cumplido",
+      "offset_ms": 1209,
+      "duration_ms": 522
+    },
+    {
+      "word": "Descansa",
+      "offset_ms": 2522,
+      "duration_ms": 488
+    },
+    {
+      "word": "3 minutos",
+      "offset_ms": 3022,
+      "duration_ms": 784
+    },
+    {
+      "word": "levántate",
+      "offset_ms": 4068,
+      "duration_ms": 522
+    },
+    {
+      "word": "estira",
+      "offset_ms": 4886,
+      "duration_ms": 352
+    },
+    {
+      "word": "los",
+      "offset_ms": 5250,
+      "duration_ms": 170
+    },
+    {
+      "word": "brazos",
+      "offset_ms": 5431,
+      "duration_ms": 409
+    },
+    {
+      "word": "o",
+      "offset_ms": 5852,
+      "duration_ms": 60
+    },
+    {
+      "word": "toma",
+      "offset_ms": 5920,
+      "duration_ms": 295
+    },
+    {
+      "word": "agüita",
+      "offset_ms": 6227,
+      "duration_ms": 431
+    }
+  ]
+}

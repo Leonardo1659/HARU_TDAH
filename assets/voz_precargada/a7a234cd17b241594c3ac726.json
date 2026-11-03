@@ -1,0 +1,47 @@
+{
+  "texto": "¡Genial! ¡Lo lograste, eres muy inteligente y valiente!",
+  "voz": "es-BO-SofiaNeural",
+  "velocidad": "+0%",
+  "marcas": [
+    {
+      "word": "Genial",
+      "offset_ms": 95,
+      "duration_ms": 579
+    },
+    {
+      "word": "Lo",
+      "offset_ms": 1454,
+      "duration_ms": 125
+    },
+    {
+      "word": "lograste",
+      "offset_ms": 1590,
+      "duration_ms": 500
+    },
+    {
+      "word": "eres",
+      "offset_ms": 2318,
+      "duration_ms": 250
+    },
+    {
+      "word": "muy",
+      "offset_ms": 2579,
+      "duration_ms": 215
+    },
+    {
+      "word": "inteligente",
+      "offset_ms": 2806,
+      "duration_ms": 647
+    },
+    {
+      "word": "y",
+      "offset_ms": 3465,
+      "duration_ms": 60
+    },
+    {
+      "word": "valiente",
+      "offset_ms": 3522,
+      "duration_ms": 534
+    }
+  ]
+}
