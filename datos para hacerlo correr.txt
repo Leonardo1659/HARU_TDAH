@@ -1,0 +1,8 @@
+deben precionar un clic en  INSTALAR_DEPENDENCIAS.bat y luego  un clic en cualquiera de los dos INICIAR_HARU . 
+para entrar al panel de tutor la contraseña por defecto es 1234, si quieren pueden ponerle API de ia en el .env
+
+
+
+si se corre desde el visual studio code tener en cuenta las librerías que se usan y la version de python 
+(instalar la version 3.12) ya que si se descarga una version mas actual, algunas librerías no podrán usarse y no llegara a correr
+el proyecto
