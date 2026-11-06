@@ -1,0 +1,38 @@
+# Entorno y Secretos (PROHIBIDO SUBIR A GITHUB)
+.env
+*.env
+!.env.example
+
+# Bases de datos SQLite locales y cachés
+*.db
+*.sqlite
+*.sqlite3
+data/*.db
+data/cache_tts/
+data/reportes/
+
+# Python y compilados
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyd
+.Python
+env/
+venv/
+ENV/
+build/
+dist/
+
+# Archivos de sistema y editores
+.vscode/
+.idea/
+*.suo
+*.user
+Thumbs.db
+Desktop.ini
+
+# Archivos temporales de audio / grabaciones
+*.wav
+*.mp3
+scratch/
+

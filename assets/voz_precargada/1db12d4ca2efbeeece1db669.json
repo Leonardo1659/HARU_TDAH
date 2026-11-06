@@ -1,0 +1,72 @@
+{
+  "texto": "¡Momento de recreo cortito! Sacude las manitos y respira profundo antes de seguir.",
+  "voz": "es-BO-SofiaNeural",
+  "velocidad": "+0%",
+  "marcas": [
+    {
+      "word": "Momento",
+      "offset_ms": 95,
+      "duration_ms": 443
+    },
+    {
+      "word": "de",
+      "offset_ms": 550,
+      "duration_ms": 79
+    },
+    {
+      "word": "recreo",
+      "offset_ms": 640,
+      "duration_ms": 375
+    },
+    {
+      "word": "cortito",
+      "offset_ms": 1027,
+      "duration_ms": 454
+    },
+    {
+      "word": "Sacude",
+      "offset_ms": 2261,
+      "duration_ms": 409
+    },
+    {
+      "word": "las",
+      "offset_ms": 2681,
+      "duration_ms": 147
+    },
+    {
+      "word": "manitos",
+      "offset_ms": 2840,
+      "duration_ms": 500
+    },
+    {
+      "word": "y",
+      "offset_ms": 3352,
+      "duration_ms": 79
+    },
+    {
+      "word": "respira",
+      "offset_ms": 3443,
+      "duration_ms": 397
+    },
+    {
+      "word": "profundo",
+      "offset_ms": 3852,
+      "duration_ms": 511
+    },
+    {
+      "word": "antes",
+      "offset_ms": 4375,
+      "duration_ms": 272
+    },
+    {
+      "word": "de",
+      "offset_ms": 4659,
+      "duration_ms": 79
+    },
+    {
+      "word": "seguir",
+      "offset_ms": 4750,
+      "duration_ms": 386
+    }
+  ]
+}

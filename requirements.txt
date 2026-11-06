@@ -1,0 +1,11 @@
+# Dependencias Modernas y Ligeras — Asistente Virtual Educativo TDAH "Haru"
+# Todos estos paquetes cuentan con instaladores binarios precompilados (wheels)
+# para Windows (Python 3.11 - 3.14), sin requerir Visual C++ Build Tools ni PyAudio.
+
+customtkinter>=5.2.2
+pillow>=10.0.0
+edge-tts>=6.1.12
+sounddevice>=0.4.6
+SpeechRecognition>=3.10.4
+pyserial>=3.5
+opencv-python>=4.9.0

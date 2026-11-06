@@ -1,0 +1,117 @@
+{
+  "texto": "¡Vamos a comenzar con Matemáticas - Sumas Divertidas! Paso 1: Saca tu cuaderno de matemáticas, tu lápiz y tu borrador sobre la mesa.",
+  "voz": "es-BO-SofiaNeural",
+  "velocidad": "+0%",
+  "marcas": [
+    {
+      "word": "Vamos",
+      "offset_ms": 95,
+      "duration_ms": 306
+    },
+    {
+      "word": "a",
+      "offset_ms": 413,
+      "duration_ms": 60
+    },
+    {
+      "word": "comenzar",
+      "offset_ms": 470,
+      "duration_ms": 409
+    },
+    {
+      "word": "con",
+      "offset_ms": 890,
+      "duration_ms": 125
+    },
+    {
+      "word": "Matemáticas",
+      "offset_ms": 1027,
+      "duration_ms": 715
+    },
+    {
+      "word": "Sumas",
+      "offset_ms": 1959,
+      "duration_ms": 306
+    },
+    {
+      "word": "Divertidas",
+      "offset_ms": 2277,
+      "duration_ms": 681
+    },
+    {
+      "word": "Paso",
+      "offset_ms": 3750,
+      "duration_ms": 250
+    },
+    {
+      "word": "1",
+      "offset_ms": 4011,
+      "duration_ms": 261
+    },
+    {
+      "word": "Saca",
+      "offset_ms": 4613,
+      "duration_ms": 272
+    },
+    {
+      "word": "tu",
+      "offset_ms": 4897,
+      "duration_ms": 125
+    },
+    {
+      "word": "cuaderno",
+      "offset_ms": 5034,
+      "duration_ms": 420
+    },
+    {
+      "word": "de",
+      "offset_ms": 5465,
+      "duration_ms": 79
+    },
+    {
+      "word": "matemáticas",
+      "offset_ms": 5556,
+      "duration_ms": 750
+    },
+    {
+      "word": "tu",
+      "offset_ms": 6556,
+      "duration_ms": 90
+    },
+    {
+      "word": "lápiz",
+      "offset_ms": 6659,
+      "duration_ms": 409
+    },
+    {
+      "word": "y",
+      "offset_ms": 7079,
+      "duration_ms": 68
+    },
+    {
+      "word": "tu",
+      "offset_ms": 7159,
+      "duration_ms": 102
+    },
+    {
+      "word": "borrador",
+      "offset_ms": 7272,
+      "duration_ms": 431
+    },
+    {
+      "word": "sobre",
+      "offset_ms": 7715,
+      "duration_ms": 215
+    },
+    {
+      "word": "la",
+      "offset_ms": 7943,
+      "duration_ms": 90
+    },
+    {
+      "word": "mesa",
+      "offset_ms": 8045,
+      "duration_ms": 352
+    }
+  ]
+}

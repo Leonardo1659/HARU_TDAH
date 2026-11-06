@@ -1,0 +1,82 @@
+{
+  "texto": "Pista de apoyo: Busca en tu mochila únicamente el cuaderno de cuadros y un lápiz.",
+  "voz": "es-BO-SofiaNeural",
+  "velocidad": "+0%",
+  "marcas": [
+    {
+      "word": "Pista",
+      "offset_ms": 95,
+      "duration_ms": 272
+    },
+    {
+      "word": "de",
+      "offset_ms": 379,
+      "duration_ms": 68
+    },
+    {
+      "word": "apoyo",
+      "offset_ms": 459,
+      "duration_ms": 375
+    },
+    {
+      "word": "Busca",
+      "offset_ms": 1118,
+      "duration_ms": 261
+    },
+    {
+      "word": "en",
+      "offset_ms": 1390,
+      "duration_ms": 68
+    },
+    {
+      "word": "tu",
+      "offset_ms": 1470,
+      "duration_ms": 68
+    },
+    {
+      "word": "mochila",
+      "offset_ms": 1550,
+      "duration_ms": 431
+    },
+    {
+      "word": "únicamente",
+      "offset_ms": 1993,
+      "duration_ms": 613
+    },
+    {
+      "word": "el",
+      "offset_ms": 2618,
+      "duration_ms": 79
+    },
+    {
+      "word": "cuaderno",
+      "offset_ms": 2709,
+      "duration_ms": 397
+    },
+    {
+      "word": "de",
+      "offset_ms": 3118,
+      "duration_ms": 102
+    },
+    {
+      "word": "cuadros",
+      "offset_ms": 3231,
+      "duration_ms": 477
+    },
+    {
+      "word": "y",
+      "offset_ms": 3720,
+      "duration_ms": 60
+    },
+    {
+      "word": "un",
+      "offset_ms": 3788,
+      "duration_ms": 136
+    },
+    {
+      "word": "lápiz",
+      "offset_ms": 3936,
+      "duration_ms": 465
+    }
+  ]
+}

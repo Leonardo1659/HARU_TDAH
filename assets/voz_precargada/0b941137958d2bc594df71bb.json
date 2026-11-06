@@ -1,0 +1,122 @@
+{
+  "texto": "Vamos a respirar juntos. Inhala profundo por la nariz como oliendo una flor... y ahora sopla despacito como apagando una velita. ¡Qué tranquilidad!",
+  "voz": "es-BO-SofiaNeural",
+  "velocidad": "+0%",
+  "marcas": [
+    {
+      "word": "Vamos",
+      "offset_ms": 95,
+      "duration_ms": 352
+    },
+    {
+      "word": "a",
+      "offset_ms": 459,
+      "duration_ms": 60
+    },
+    {
+      "word": "respirar",
+      "offset_ms": 515,
+      "duration_ms": 465
+    },
+    {
+      "word": "juntos",
+      "offset_ms": 993,
+      "duration_ms": 556
+    },
+    {
+      "word": "Inhala",
+      "offset_ms": 2340,
+      "duration_ms": 340
+    },
+    {
+      "word": "profundo",
+      "offset_ms": 2693,
+      "duration_ms": 420
+    },
+    {
+      "word": "por",
+      "offset_ms": 3125,
+      "duration_ms": 136
+    },
+    {
+      "word": "la",
+      "offset_ms": 3272,
+      "duration_ms": 90
+    },
+    {
+      "word": "nariz",
+      "offset_ms": 3375,
+      "duration_ms": 340
+    },
+    {
+      "word": "como",
+      "offset_ms": 3727,
+      "duration_ms": 227
+    },
+    {
+      "word": "oliendo",
+      "offset_ms": 3965,
+      "duration_ms": 363
+    },
+    {
+      "word": "una",
+      "offset_ms": 4340,
+      "duration_ms": 181
+    },
+    {
+      "word": "flor",
+      "offset_ms": 4534,
+      "duration_ms": 250
+    },
+    {
+      "word": "y",
+      "offset_ms": 5056,
+      "duration_ms": 90
+    },
+    {
+      "word": "ahora",
+      "offset_ms": 5159,
+      "duration_ms": 261
+    },
+    {
+      "word": "sopla",
+      "offset_ms": 5431,
+      "duration_ms": 295
+    },
+    {
+      "word": "despacito",
+      "offset_ms": 5738,
+      "duration_ms": 556
+    },
+    {
+      "word": "como",
+      "offset_ms": 6306,
+      "duration_ms": 227
+    },
+    {
+      "word": "apagando",
+      "offset_ms": 6545,
+      "duration_ms": 465
+    },
+    {
+      "word": "una",
+      "offset_ms": 7022,
+      "duration_ms": 193
+    },
+    {
+      "word": "velita",
+      "offset_ms": 7227,
+      "duration_ms": 443
+    },
+    {
+      "word": "Qué",
+      "offset_ms": 8454,
+      "duration_ms": 125
+    },
+    {
+      "word": "tranquilidad",
+      "offset_ms": 8590,
+      "duration_ms": 693
+    }
+  ]
+}

@@ -1,0 +1,52 @@
+{
+  "texto": "¡Fantástico! ¡Vamos con toda la alegría al siguiente paso!",
+  "voz": "es-BO-SofiaNeural",
+  "velocidad": "+0%",
+  "marcas": [
+    {
+      "word": "Fantástico",
+      "offset_ms": 95,
+      "duration_ms": 795
+    },
+    {
+      "word": "Vamos",
+      "offset_ms": 1670,
+      "duration_ms": 306
+    },
+    {
+      "word": "con",
+      "offset_ms": 1988,
+      "duration_ms": 170
+    },
+    {
+      "word": "toda",
+      "offset_ms": 2170,
+      "duration_ms": 215
+    },
+    {
+      "word": "la",
+      "offset_ms": 2397,
+      "duration_ms": 90
+    },
+    {
+      "word": "alegría",
+      "offset_ms": 2500,
+      "duration_ms": 420
+    },
+    {
+      "word": "al",
+      "offset_ms": 2931,
+      "duration_ms": 90
+    },
+    {
+      "word": "siguiente",
+      "offset_ms": 3034,
+      "duration_ms": 420
+    },
+    {
+      "word": "paso",
+      "offset_ms": 3465,
+      "duration_ms": 363
+    }
+  ]
+}
