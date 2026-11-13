@@ -7,22 +7,35 @@ al compartir el proyecto en `.zip` en cualquier carpeta o computadora Windows.
 """
 
 import os
+import sys
 from pathlib import Path
 from typing import Dict
 
-# Directorios principales del proyecto
-ROOT_DIR: Path = Path(__file__).resolve().parent.parent
+# Directorios principales del proyecto (soporta código fuente y ejecutable portable Haru.exe)
+if getattr(sys, "frozen", False):
+    ROOT_DIR: Path = Path(sys.executable).resolve().parent
+    APP_DIR: Path = Path(getattr(sys, "_MEIPASS", ROOT_DIR)).resolve()
+elif os.environ.get("HARU_PORTABLE_ROOT"):
+    ROOT_DIR: Path = Path(os.environ["HARU_PORTABLE_ROOT"]).resolve()
+    APP_DIR: Path = Path(os.environ.get("HARU_APP_DIR", str(ROOT_DIR))).resolve()
+else:
+    ROOT_DIR: Path = Path(__file__).resolve().parent.parent
+    APP_DIR: Path = ROOT_DIR
+
 DATA_DIR: Path = ROOT_DIR / "data"
 LOGS_DIR: Path = DATA_DIR / "logs"
 CACHE_TTS_DIR: Path = DATA_DIR / "cache_tts"
-ASSETS_DIR: Path = ROOT_DIR / "assets"
+ASSETS_DIR: Path = APP_DIR / "assets"
 SPRITES_DIR: Path = ASSETS_DIR / "sprites"
 AUDIO_PRECARGADO_DIR: Path = ASSETS_DIR / "voz_precargada"
 DB_PATH: Path = DATA_DIR / "haru_tdah.db"
 ENV_PATH: Path = ROOT_DIR / ".env"
 
-for _carpeta in (DATA_DIR, LOGS_DIR, CACHE_TTS_DIR, ASSETS_DIR, SPRITES_DIR, AUDIO_PRECARGADO_DIR):
+for _carpeta in (DATA_DIR, LOGS_DIR, CACHE_TTS_DIR):
     _carpeta.mkdir(parents=True, exist_ok=True)
+if not getattr(sys, "frozen", False):
+    for _carpeta in (ASSETS_DIR, SPRITES_DIR, AUDIO_PRECARGADO_DIR):
+        _carpeta.mkdir(parents=True, exist_ok=True)
 
 
 def cargar_env_local(ruta_env: Path = ENV_PATH) -> Dict[str, str]:

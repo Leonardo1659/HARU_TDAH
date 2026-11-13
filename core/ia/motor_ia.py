@@ -20,6 +20,7 @@ import urllib.parse
 import urllib.request
 from typing import Dict, List, Optional, Tuple
 
+from core.archivos_estudio import DocumentoEstudio
 from core.config import ENV_PATH, MODELO_GEMINI_DEFECTO, OLLAMA_URL_BASE, cargar_env_local
 from core.ia.calculadora_ast import resolver_pregunta_matematica
 
@@ -340,6 +341,120 @@ class MotorIAHaru:
         return False, f"No fue posible conectar con Gemini API.{extra}"
 
     # =========================================================================
+    # 0. CLASIFICADOR AUTOMÁTICO DE MÓDULO CURRICULAR (TEXTO, VOZ O ARCHIVO)
+    # =========================================================================
+    def detectar_modulo_automatico(self, texto: str, modulo_preferido: str = "") -> str:
+        """
+        Detecta automáticamente a cuál de los 5 Módulos Curriculares pertenece una
+        instrucción escrita, dictada por micrófono o extraída de un archivo escolar:
+        ('Matemáticas', 'Lenguaje', 'Ciencias', 'Inglés', 'Hábitos y Orden').
+        """
+        txt_low = (texto or "").lower()
+        limpio = re.sub(r"[^a-záéíóúñ0-9+\-×*/\s]", " ", txt_low)
+        tokens = set(limpio.split())
+
+        puntajes: Dict[str, int] = {
+            "Inglés": 0,
+            "Matemáticas": 0,
+            "Lenguaje": 0,
+            "Ciencias": 0,
+            "Hábitos y Orden": 0,
+        }
+
+        # Palabras e indicadores de Inglés
+        kw_ingles_fuerte = {
+            "ingles", "inglés", "english", "hello", "goodbye", "vocabulary",
+            "colors", "animals", "numbers", "blue", "red", "yellow", "green",
+            "orange", "purple", "cat", "dog", "bird", "rabbit", "lion",
+            "one", "two", "three", "four", "five", "six", "seven", "eight",
+            "nine", "ten", "mother", "father", "sister", "brother", "family",
+            "apple", "banana", "school", "teacher", "student", "book", "pencil",
+            "good", "morning", "afternoon", "night", "champion", "words",
+        }
+        for w in kw_ingles_fuerte:
+            if w in tokens:
+                puntajes["Inglés"] += 3 if w in ("ingles", "inglés", "english", "vocabulary") else 2
+        if any(fr in txt_low for fr in ("en inglés", "en ingles", "in english", "how do you say", "repeat after me")):
+            puntajes["Inglés"] += 5
+
+        # Palabras e indicadores de Matemáticas
+        kw_mate = {
+            "matematica", "matematicas", "matemáticas", "matemática", "suma", "sumas",
+            "sumar", "resta", "restas", "restar", "multiplica", "multiplicacion",
+            "multiplicación", "multiplicar", "divide", "division", "división", "dividir",
+            "fraccion", "fracción", "fracciones", "numero", "numeros", "número", "números",
+            "calculo", "cálculo", "calcular", "decena", "decenas", "unidad", "unidades",
+            "centena", "geometria", "geometría", "triangulo", "cuadrado", "rectangulo",
+            "operacion", "operaciones", "aritmetica", "aritmética",
+        }
+        for w in kw_mate:
+            if w in tokens:
+                puntajes["Matemáticas"] += 2
+        if re.search(r"\b\d+\s*[+\-×x*/]\s*\d+\b", txt_low):
+            puntajes["Matemáticas"] += 4
+
+        # Palabras e indicadores de Lenguaje
+        kw_lenguaje = {
+            "lenguaje", "lectura", "leer", "cuento", "cuentos", "fabula", "fábula",
+            "poema", "poesia", "poesía", "oracion", "oración", "oraciones", "parrafo",
+            "párrafo", "verbo", "verbos", "sustantivo", "sustantivos", "adjetivo",
+            "adjetivos", "silaba", "sílaba", "silabas", "sílabas", "ortografia",
+            "ortografía", "redaccion", "redacción", "abecedario", "sinonimo",
+            "sinónimo", "antonimo", "antónimo", "personaje", "narracion",
+        }
+        for w in kw_lenguaje:
+            if w in tokens:
+                puntajes["Lenguaje"] += 2
+
+        # Palabras e indicadores de Ciencias
+        kw_ciencias = {
+            "ciencias", "ciencia", "naturales", "planta", "plantas", "fotosintesis",
+            "fotosíntesis", "agua", "evaporacion", "evaporación", "nube", "lluvia",
+            "planeta", "planetas", "solar", "tierra", "ecosistema", "naturaleza",
+            "cuerpo", "humano", "experimento", "dinosaurio", "dinosaurios", "celula",
+            "célula", "energia", "energía", "vertebrados", "invertebrados", "reciclaje",
+        }
+        for w in kw_ciencias:
+            if w in tokens:
+                puntajes["Ciencias"] += 2
+        if "ciclo del agua" in txt_low or "sistema solar" in txt_low or "seres vivos" in txt_low:
+            puntajes["Ciencias"] += 4
+
+        # Palabras e indicadores de Hábitos y Orden
+        kw_habitos = {
+            "habito", "hábito", "habitos", "hábitos", "orden", "organizacion",
+            "organización", "mochila", "estuche", "cartuchera", "horario", "rutina",
+            "escritorio", "limpieza", "puntualidad", "responsabilidad", "alistar",
+            "guardar", "ordenar",
+        }
+        for w in kw_habitos:
+            if w in tokens:
+                puntajes["Hábitos y Orden"] += 2
+
+        mejor_modulo, mejor_puntaje = max(puntajes.items(), key=lambda kv: kv[1])
+        if mejor_puntaje > 0:
+            return mejor_modulo
+
+        if modulo_preferido:
+            if self.db and hasattr(self.db, "normalizar_modulo"):
+                return self.db.normalizar_modulo(modulo_preferido)
+            return modulo_preferido
+        return "Matemáticas"
+
+    def _obtener_contexto_pensum(self, tarea_o_texto: str) -> str:
+        """Recupera el resumen de pensum cargado por el docente para el módulo actual."""
+        if not self.db or not hasattr(self.db, "obtener_pensum_modulo"):
+            return ""
+        modulo = self.detectar_modulo_automatico(tarea_o_texto)
+        info = self.db.obtener_pensum_modulo(modulo)
+        if not info or not info.get("contenido_resumen"):
+            return ""
+        return (
+            f"Contexto del pensum escolar del módulo {modulo} ({info.get('nombre_archivo', 'Guía')}): "
+            f"'{info['contenido_resumen'][:420]}'. "
+        )
+
+    # =========================================================================
     # 1. TUTOR ACADÉMICO GUIADO EN CAPAS
     # =========================================================================
     def responder_consulta_escolar(
@@ -367,6 +482,7 @@ class MotorIAHaru:
                 self.ultima_fuente = "Conocimiento Escolar SQLite"
                 return resp_local
 
+        contexto_pensum = self._obtener_contexto_pensum(f"{tarea_actual} {pregunta_limpia}")
         if modo_charla_libre or not paso_actual:
             contexto = (
                 f"El niño de primaria ya está en modo descanso/charla libre tras terminar '{tarea_actual[:80]}'. "
@@ -379,7 +495,7 @@ class MotorIAHaru:
                 else ""
             )
         prompt = (
-            f"{contexto}Mensaje del niño de primaria: '{pregunta_limpia}'. "
+            f"{contexto_pensum}{contexto}Mensaje del niño de primaria: '{pregunta_limpia}'. "
             f"Responde como Haru en español neutro/boliviano, en máximo 2 oraciones cortitas, cálidas y claras, sin usar asteriscos."
         )
 
@@ -437,13 +553,28 @@ class MotorIAHaru:
         return f"¡Tú puedes con el paso {num_paso}! Haz solo esta pequeña acción y presiona ¡Paso Listo!"
 
     # =========================================================================
-    # 3. DESCOMPONEDOR AUTOMÁTICO DE TAREAS PARA EL PANEL DOCENTE
+    # 3. DESCOMPONEDOR AUTOMÁTICO DE TAREAS Y EXTRACTOR MULTIMODAL DE DOCUMENTOS
     # =========================================================================
-    def descomponer_tarea_ia(self, tema_tarea: str) -> Tuple[List[str], List[str]]:
-        tema = re.sub(r"\s+", " ", (tema_tarea or "")).strip()[:150] or "Actividad Escolar"
+    def descomponer_tarea_ia(
+        self, tema_tarea: str, modulo_forzado: Optional[str] = None
+    ) -> Tuple[List[str], List[str]]:
+        tema = re.sub(r"\s+", " ", (tema_tarea or "")).strip()[:180] or "Actividad Escolar"
+        modulo = (
+            self.db.normalizar_modulo(modulo_forzado)
+            if (modulo_forzado and self.db and hasattr(self.db, "normalizar_modulo"))
+            else (modulo_forzado or self.detectar_modulo_automatico(tema))
+        )
+        contexto_pensum = self._obtener_contexto_pensum(f"{modulo} {tema}")
+        instruccion_idioma = (
+            "Como es del módulo de Inglés para niños hispanohablantes de primaria, redacta las instrucciones "
+            "en español cálido e incluye las palabras clave en inglés en MAYÚSCULAS (ej. BLUE, CAT, One, Two, Three). "
+            if modulo == "Inglés"
+            else ""
+        )
         prompt = (
-            f"Como especialista en psicopedagogía TDAH para niños de primaria, divide la tarea "
-            f"'{tema}' en exactamente 4 micro-pasos secuenciales muy concretos y 4 pistas breves. "
+            f"{contexto_pensum}Como especialista en psicopedagogía TDAH para niños de primaria en el módulo '{modulo}', "
+            f"divide la tarea '{tema}' en exactamente 4 micro-pasos secuenciales muy concretos y 4 pistas breves. "
+            f"{instruccion_idioma}"
             f"Responde ÚNICAMENTE con un objeto JSON válido con las claves 'pasos' (4 strings) "
             f"y 'pistas' (4 strings)."
         )
@@ -466,8 +597,20 @@ class MotorIAHaru:
                     pass
 
         self.ultima_fuente = "Plantilla Psicopedagógica Local"
-        t_low = tema.lower()
-        if any(w in t_low for w in ["matem", "suma", "resta", "multiplica", "divisi", "fracci", "problema", "calcul"]):
+        if modulo == "Inglés":
+            pasos = [
+                f"¡Hello! Saca tu cuaderno de inglés y tus colores para practicar «{tema}».",
+                "Busca o dibuja el primer ejemplo en tu hoja y repite su nombre en inglés en voz alta: BLUE!",
+                "Escribe la palabra en inglés con letra grande y dibuja su significado al lado: CAT!",
+                "¡You are a champion! Cuenta One, Two, Three dando tres aplausos y guarda tu cuaderno.",
+            ]
+            pistas = [
+                "Solo necesitas tu cuaderno de inglés y estar cómodo en tu silla.",
+                "Decir la palabra en inglés en voz alta ayuda a recordarla mejor.",
+                "Usa un color distinto para las letras en inglés y otro para tu dibujo.",
+                "One es uno, Two es dos, Three es tres. ¡Lo hiciste genial!",
+            ]
+        elif modulo == "Matemáticas":
             pasos = [
                 f"Prepara únicamente tu cuaderno de matemáticas, lápiz y borrador para «{tema}».",
                 "Copia el primer ejercicio dejando buen espacio entre cada número.",
@@ -480,7 +623,7 @@ class MotorIAHaru:
                 "Si tienes dudas con una cuenta, escríbela en la barra de Haru IA.",
                 "¡Muy bien! Revisar al final evita pequeños descuidos.",
             ]
-        elif any(w in t_low for w in ["lengua", "lectura", "cuento", "escrib", "oraci", "redac", "poema", "libro"]):
+        elif modulo == "Lenguaje":
             pasos = [
                 f"Abre tu libro o cuaderno de lenguaje en el tema «{tema}».",
                 "Lee en voz alta el primer fragmento siguiendo las palabras con tu dedo.",
@@ -493,7 +636,7 @@ class MotorIAHaru:
                 "Busca de quién trata el texto y qué acción realiza.",
                 "Di primero la frase en voz alta antes de escribirla.",
             ]
-        elif any(w in t_low for w in ["cienci", "natural", "planta", "animal", "agua", "cuerpo", "planeta", "experimento"]):
+        elif modulo == "Ciencias":
             pasos = [
                 f"Saca tu cuaderno y 3 lápices de colores para trabajar «{tema}».",
                 "Observa las imágenes o el concepto principal del tema.",
@@ -508,10 +651,10 @@ class MotorIAHaru:
             ]
         else:
             pasos = [
-                f"Prepara sobre tu mesa solo los materiales para «{tema}».",
-                f"Realiza la primera parte de «{tema}» con calma durante unos minutos.",
-                "Completa la segunda parte avanzando un detalle a la vez.",
-                "Revisa tu trabajo terminado y guarda tus útiles en orden.",
+                f"Prepara sobre tu mesa solo los materiales necesarios para «{tema}».",
+                f"Realiza la primera parte de «{tema}» con calma y orden.",
+                "Completa la segunda parte verificando que cada útil vuelva a su lugar.",
+                "Revisa tu espacio limpio y celebra tu constancia con Haru.",
             ]
             pistas = [
                 "Un escritorio despejado ayuda a tu cerebro a concentrarse.",
@@ -520,3 +663,97 @@ class MotorIAHaru:
                 "Ordenar al final te convierte en un campeón organizado.",
             ]
         return pasos, pistas
+
+    def responder_sobre_documento(
+        self, documento_texto: str, pregunta: str = "", nombre_doc: str = "tu archivo"
+    ) -> str:
+        """Explica el contenido de un documento escolar al niño o al docente de forma breve y clara."""
+        fragmento = re.sub(r"\s+", " ", (documento_texto or "")).strip()[:2200]
+        if not fragmento:
+            self.ultima_fuente = "Local"
+            return f"Leí el archivo {nombre_doc}, pero parece no tener texto legible."
+
+        modulo = self.detectar_modulo_automatico(fragmento)
+        consulta = re.sub(r"\s+", " ", (pregunta or "")).strip()[:240]
+        if consulta:
+            prompt = (
+                f"Documento escolar de {modulo} ('{nombre_doc}'): \"{fragmento}\".\n"
+                f"Pregunta del estudiante de primaria: '{consulta}'. "
+                f"Responde como Haru en 2 o 3 oraciones muy claras, tiernas y sin asteriscos."
+            )
+        else:
+            prompt = (
+                f"Documento escolar de {modulo} ('{nombre_doc}'): \"{fragmento}\".\n"
+                f"Explícale al niño de primaria en 2 oraciones motivadoras de qué trata este material "
+                f"y cuál es el primer pasito para resolverlo, sin usar asteriscos."
+            )
+
+        for proveedor in (self._llamar_ollama, self._llamar_gemini):
+            resp = proveedor(prompt)
+            if resp:
+                return _limpiar_respuesta_ia(resp, max_chars=340)
+
+        self.ultima_fuente = "Analizador Local de Documentos"
+        oraciones = [s.strip() for s in re.split(r"(?<=[.!?])\s+", fragmento) if len(s.strip()) > 15]
+        idea_1 = oraciones[0][:140] if oraciones else fragmento[:140]
+        return (
+            f"¡Revisé tu guía «{nombre_doc}» del módulo de {modulo}! "
+            f"Trata principalmente sobre: {idea_1}. ¡Podemos resolverla paso a paso juntos!"
+        )
+
+    def extraer_tareas_de_documento(
+        self, documento: DocumentoEstudio, modulo_defecto: str = ""
+    ) -> List[Dict]:
+        """
+        Analiza el documento completo (incluso documentos mixtos con varias materias) y propone
+        una lista de tareas estructuradas paso a paso, cada una con su módulo auto-detectado:
+        `[{"nombre": str, "categoria": str, "pasos": List[str], "pistas": List[str], "resumen_fuente": str}]`.
+        """
+        bloques = documento.dividir_en_bloques_tematicos(max_bloques=6)
+        if not bloques and documento.texto_completo.strip():
+            bloques = [documento.texto_completo.strip()]
+
+        tareas_propuestas: List[Dict] = []
+        nombres_vistos = set()
+
+        for idx, bloque in enumerate(bloques, start=1):
+            limpio = re.sub(r"\s+", " ", bloque).strip()
+            if len(limpio) < 12:
+                continue
+
+            # Auto-detectar el módulo curricular específico de este bloque (soporta guías mixtas)
+            modulo_bloque = self.detectar_modulo_automatico(limpio, modulo_preferido=modulo_defecto)
+
+            # Extraer un título breve y limpio a partir del primer renglón o encabezado del bloque
+            lineas_bloque = [ln.strip(" -•*#\t") for ln in bloque.splitlines() if ln.strip()]
+            encabezado_raw = lineas_bloque[0] if lineas_bloque else limpio[:55]
+            encabezado = re.sub(r"^(?:tema|unidad|actividad|tarea|ejercicio|m[oó]dulo|gu[ií]a)\s*\d*[:.\-]\s*", "", encabezado_raw, flags=re.IGNORECASE).strip()
+            if len(encabezado) > 48:
+                encabezado = encabezado[:48].rsplit(" ", 1)[0].strip()
+            if len(encabezado) < 4:
+                encabezado = f"Actividad {idx} de {documento.titulo_sugerido[:28]}"
+
+            prefijo_mod = f"{modulo_bloque} - "
+            if not encabezado.lower().startswith(modulo_bloque.lower()[:5]):
+                nombre_candidato = f"{prefijo_mod}{encabezado}"
+            else:
+                nombre_candidato = encabezado
+
+            if nombre_candidato.lower() in nombres_vistos:
+                nombre_candidato = f"{nombre_candidato} ({idx})"
+            nombres_vistos.add(nombre_candidato.lower())
+
+            pasos, pistas = self.descomponer_tarea_ia(
+                f"{encabezado}: {limpio[:240]}",
+                modulo_forzado=modulo_bloque,
+            )
+
+            tareas_propuestas.append({
+                "nombre": nombre_candidato,
+                "categoria": modulo_bloque,
+                "pasos": pasos,
+                "pistas": pistas,
+                "resumen_fuente": limpio[:220],
+            })
+
+        return tareas_propuestas

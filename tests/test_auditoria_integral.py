@@ -179,6 +179,15 @@ class TestAuditoriaIntegralHaru(unittest.TestCase):
             img_abierta = _renderizar_haru_3d("ROBOT_KAWAII", "ABIERTO", 1, "NEUTRO_A", 0)
             self.assertNotEqual(img_cerrada.tobytes(), img_abierta.tobytes())
 
+            # Verificar escalado dinámico en pantalla completa (Haru crece más del doble en 1080p)
+            alto_ventana, esc_ventana = escenario._calcular_escala_escenario(480, 310)
+            alto_full, esc_full = escenario._calcular_escala_escenario(1200, 680)
+            self.assertGreater(alto_full, alto_ventana + 150)
+            self.assertGreater(esc_full, 1.8)
+            img_full = _renderizar_haru_3d("ROBOT_KAWAII", "FELIZ", 0, "NEUTRO_A", 0, alto_px=alto_full)
+            self.assertEqual(img_full.size[1], alto_full)
+            self.assertGreater(img_full.size[0], 450)
+
             # 2) ESCUCHANDO: mano al oído y boca cerrada atenta (0)
             escenario.actualizar_estado("ESCUCHANDO")
             escenario.actualizar_nivel_mic(0.75)
@@ -619,6 +628,122 @@ class TestAuditoriaIntegralHaru(unittest.TestCase):
         for emoji_informal in ("📊", "⭐", "🎯", "☕", "🎁", "✅", "⏱️"):
             self.assertNotIn(emoji_informal, html_txt)
 
+    # =========================================================================
+    # 8. 5 MÓDULOS CURRICULARES, AUTO-CLASIFICACIÓN, GUÍAS MIXTAS Y PENSUM
+    # =========================================================================
+    def test_12_modulos_autoclasificacion_documentos_mixtos_pensum_y_voz_docente(self):
+        from core.archivos_estudio import cargar_archivo_estudio
+        from core.comprobacion_activa import generar_reto_paso, validar_respuesta_reto
+        from ui.modales import ModalAprobadorTareasDocumento
+
+        # 1) Existen los 5 Módulos Curriculares oficiales y la misión de Inglés base
+        tareas_ini = self.db.listar_tareas()
+        self.assertGreaterEqual(len(tareas_ini), 5)
+        ingles_tareas = self.db.listar_tareas_por_modulo("Inglés")
+        self.assertGreaterEqual(len(ingles_tareas), 1)
+        self.assertEqual(ingles_tareas[0]["nombre"], "Inglés - Jugando con Palabras")
+
+        # 2) Comprobación activa bilingüe para pasos de Inglés (BLUE, CAT, One Two Three)
+        pasos_ing = ingles_tareas[0]["pasos"]
+        reto_blue = generar_reto_paso(pasos_ing[1], 2, "Inglés - Jugando con Palabras")
+        self.assertEqual(reto_blue["tipo"], "ingles")
+        self.assertTrue(validar_respuesta_reto(reto_blue, "BLUE")[0])
+        self.assertTrue(validar_respuesta_reto(reto_blue, "azul")[0])
+
+        reto_cat = generar_reto_paso(pasos_ing[2], 3, "Inglés - Jugando con Palabras")
+        self.assertEqual(reto_cat["tipo"], "ingles")
+        self.assertTrue(validar_respuesta_reto(reto_cat, "CAT")[0])
+
+        reto_count = generar_reto_paso(pasos_ing[3], 4, "Inglés - Jugando con Palabras")
+        self.assertEqual(reto_count["tipo"], "ingles")
+        self.assertTrue(validar_respuesta_reto(reto_count, "One, Two, Three")[0])
+
+        # 3) Auto-clasificación inteligente de módulo por texto/voz/archivo
+        self.assertEqual(self.ia.detectar_modulo_automatico("Sumas y restas llevando 24 + 18"), "Matemáticas")
+        self.assertEqual(self.ia.detectar_modulo_automatico("Colors in English: BLUE, RED and CAT"), "Inglés")
+        self.assertEqual(self.ia.detectar_modulo_automatico("El ciclo del agua y las plantas"), "Ciencias")
+        self.assertEqual(self.ia.detectar_modulo_automatico("Lectura de cuento: verbos y sustantivos"), "Lenguaje")
+        self.assertEqual(self.ia.detectar_modulo_automatico("Ordenar mi mochila y mi estuche"), "Hábitos y Orden")
+
+        # 4) Ingesta de documento escolar MIXTO (Matemáticas + Inglés en un mismo archivo)
+        ruta_guia = os.path.join(self.temp_dir.name, "guia_escolar_mixta.md")
+        contenido_mixto = (
+            "# Tema 1: Sumas y Restas de Dos Cifras\n"
+            "Resuelve en tu cuaderno de matemáticas las operaciones 18 + 14 y 35 - 12 alineando decenas y unidades.\n\n"
+            "# Tema 2: English Vocabulary Colors and Animals\n"
+            "Practice in English the colors BLUE, RED, GREEN and animals CAT and DOG repeating aloud.\n"
+        )
+        Path(ruta_guia).write_text(contenido_mixto, encoding="utf-8")
+
+        doc = cargar_archivo_estudio(ruta_guia)
+        self.assertTrue(doc.exito)
+        propuestas = self.ia.extraer_tareas_de_documento(doc)
+        self.assertGreaterEqual(len(propuestas), 2)
+        categorias_detectadas = {p["categoria"] for p in propuestas}
+        self.assertIn("Matemáticas", categorias_detectadas)
+        self.assertIn("Inglés", categorias_detectadas)
+
+        # 5) Panel Docente procesa archivo, guarda Pensum, aprueba en lote y filtra por módulo
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            panel = PanelDocente(
+                root,
+                motor_tdah=self.motor,
+                repositorio_db=self.db,
+                motor_ia=self.ia,
+                controlador_hardware=self.hw,
+                tema=TEMAS["CALMA"],
+            )
+            panel.withdraw()
+            self.assertTrue(hasattr(panel, "btn_dictar_ia"))
+            self.assertTrue(hasattr(panel, "btn_subir_archivo"))
+
+            lote = panel.procesar_archivo_pensum(ruta_guia, abrir_modal=False)
+            self.assertGreaterEqual(len(lote), 2)
+            self.assertIsNotNone(self.db.obtener_pensum_modulo("Matemáticas"))
+            self.assertIsNotNone(self.db.obtener_pensum_modulo("Inglés"))
+
+            # Probar aprobación en lote ("Subir Todas de Golpe") desde ModalAprobadorTareasDocumento
+            importadas = {"n": 0}
+            modal_doc = ModalAprobadorTareasDocumento(
+                panel,
+                nombre_archivo=doc.nombre_archivo,
+                tareas_propuestas=lote,
+                tema=TEMAS["CALMA"],
+                on_aprobar_lote=lambda lista: importadas.__setitem__(
+                    "n", self.db.guardar_lote_tareas(lista)
+                ),
+            )
+            modal_doc.withdraw()
+            modal_doc._confirmar_importacion(forzar_todas=True)
+            self.assertGreaterEqual(importadas["n"], 2)
+
+            # Verificar que cada tarea fue a su módulo correspondiente sin mezclarse
+            tareas_mate = self.db.listar_tareas_por_modulo("Matemáticas")
+            tareas_ing = self.db.listar_tareas_por_modulo("Inglés")
+            self.assertGreaterEqual(len(tareas_mate), 2)
+            self.assertGreaterEqual(len(tareas_ing), 2)
+
+            # Progreso por módulo se actualiza al completar una misión
+            self.motor.cargar_tarea(ingles_tareas[0]["nombre"], ingles_tareas[0]["pasos"], ingles_tareas[0]["pistas"])
+            self.motor.iniciar_tarea()
+            self.motor.completar_tarea()
+            prog = self.db.obtener_progreso_modulos()
+            self.assertGreaterEqual(prog["Inglés"][0], 1)
+
+            # Nudge de retención de atención emite evento no punitivo
+            self.bus.extraer_pendientes()
+            msg_nudge = self.motor.disparar_nudge_retencion()
+            self.assertIn("paso", msg_nudge.lower())
+            evs = self.bus.extraer_pendientes()
+            self.assertTrue(any(e.tipo == "nudge_atencion" for e in evs))
+
+            panel.cerrar_panel()
+        finally:
+            root.destroy()
+
 
 if __name__ == "__main__":
     unittest.main()
+

@@ -7,17 +7,18 @@ Incluye corrección de foco en Windows para `CTkToplevel`, iconografía vectoria
 álbum visual de recompensas y Micro-Validación Interactiva por paso (Opción B).
 """
 
-from typing import Callable, Dict, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 import customtkinter as ctk
 
-from ui.iconos import icono_ctk, icono_skin_ctk
+from ui.iconos import aplicar_icono_ventana_haru, icono_ctk, icono_skin_ctk
 
 
 def _fijar_foco_modal(ventana: ctk.CTkToplevel) -> None:
     if not ventana.winfo_exists():
         return
     try:
+        aplicar_icono_ventana_haru(ventana)
         ventana.lift()
         ventana.focus_force()
         ventana.grab_set()
@@ -46,7 +47,8 @@ class ModalPinDocente(ctk.CTkToplevel):
         self._construir_ui()
         self.bind("<Key>", self._manejar_tecla_fisica)
         self.protocol("WM_DELETE_WINDOW", self.cerrar)
-        self.after(150, lambda: _fijar_foco_modal(self))
+        self._after_foco_id = self.after(150, lambda: _fijar_foco_modal(self))
+        self._after_bloqueo_id = None
         self._actualizar_estado_bloqueo()
 
     def _construir_ui(self) -> None:
@@ -209,7 +211,7 @@ class ModalPinDocente(ctk.CTkToplevel):
                 text=f"Teclado bloqueado por seguridad: espera {seg}s",
                 text_color="#dc2626",
             )
-            self.after(1000, self._actualizar_estado_bloqueo)
+            self._after_bloqueo_id = self.after(1000, self._actualizar_estado_bloqueo)
         else:
             for b in self._botones_pad:
                 b.configure(state="normal")
@@ -218,6 +220,14 @@ class ModalPinDocente(ctk.CTkToplevel):
         if self._cerrado:
             return
         self._cerrado = True
+        for attr in ("_after_foco_id", "_after_bloqueo_id"):
+            aid = getattr(self, attr, None)
+            if aid:
+                try:
+                    self.after_cancel(aid)
+                except Exception:
+                    pass
+                setattr(self, attr, None)
         try:
             self.grab_release()
         except Exception:
@@ -353,9 +363,15 @@ class ModalAlbumPremios(ctk.CTkToplevel):
         self.protocol("WM_DELETE_WINDOW", self.cerrar)
         self.bind("<Escape>", lambda _e: self.cerrar())
         self._mostrar_tab("logros")
-        self.after(150, lambda: _fijar_foco_modal(self))
+        self._after_foco_id = self.after(150, lambda: _fijar_foco_modal(self))
 
     def cerrar(self) -> None:
+        if getattr(self, "_after_foco_id", None):
+            try:
+                self.after_cancel(self._after_foco_id)
+            except Exception:
+                pass
+            self._after_foco_id = None
         try:
             self.grab_release()
         except Exception:
@@ -641,9 +657,11 @@ class ModalComprobacionPaso(ctk.CTkToplevel):
         self._construir_ui()
         self.protocol("WM_DELETE_WINDOW", self.cerrar)
         self.bind("<Escape>", lambda _e: self.cerrar())
-        self.after(130, lambda: _fijar_foco_modal(self))
+        self._after_foco_id = self.after(130, lambda: _fijar_foco_modal(self))
+        self._after_hablar_id = None
+        self._after_exito_id = None
         if self.on_hablar and self.reto.get("pregunta"):
-            self.after(180, lambda: self.on_hablar(self.reto["pregunta"]) if not self._cerrado else None)
+            self._after_hablar_id = self.after(180, lambda: self.on_hablar(self.reto["pregunta"]) if not self._cerrado else None)
 
     def _construir_ui(self) -> None:
         card = ctk.CTkFrame(
@@ -825,7 +843,7 @@ class ModalComprobacionPaso(ctk.CTkToplevel):
         if correcta:
             self._resuelto = True
             self.lbl_feedback.configure(text=mensaje, text_color="#15803d")
-            self.after(260, self._finalizar_exito)
+            self._after_exito_id = self.after(260, self._finalizar_exito)
             return True
 
         self.lbl_feedback.configure(text=mensaje, text_color="#d97706")
@@ -834,6 +852,7 @@ class ModalComprobacionPaso(ctk.CTkToplevel):
         return False
 
     def _finalizar_exito(self) -> None:
+        self._after_exito_id = None
         self.cerrar()
         self.on_superado()
 
@@ -841,6 +860,14 @@ class ModalComprobacionPaso(ctk.CTkToplevel):
         if self._cerrado:
             return
         self._cerrado = True
+        for attr in ("_after_foco_id", "_after_hablar_id", "_after_exito_id"):
+            aid = getattr(self, attr, None)
+            if aid:
+                try:
+                    self.after_cancel(aid)
+                except Exception:
+                    pass
+                setattr(self, attr, None)
         try:
             self.grab_release()
         except Exception:
@@ -927,9 +954,15 @@ class ModalEntradaVozTexto(ctk.CTkToplevel):
 
         self.protocol("WM_DELETE_WINDOW", self.cerrar)
         self.bind("<Escape>", lambda _e: self.cerrar())
-        self.after(150, lambda: (_fijar_foco_modal(self), self.entrada.focus_set()))
+        self._after_foco_id = self.after(150, lambda: (_fijar_foco_modal(self), self.entrada.focus_set()))
 
     def cerrar(self) -> None:
+        if getattr(self, "_after_foco_id", None):
+            try:
+                self.after_cancel(self._after_foco_id)
+            except Exception:
+                pass
+            self._after_foco_id = None
         try:
             self.grab_release()
         except Exception:
@@ -942,3 +975,230 @@ class ModalEntradaVozTexto(ctk.CTkToplevel):
         self.cerrar()
         if txt:
             self.on_enviar(txt)
+
+
+class ModalAprobadorTareasDocumento(ctk.CTkToplevel):
+    """
+    Ventana de previsualización e importación inteligente de tareas extraídas de un
+    archivo escolar (.pdf, .docx, .txt, .md, .csv) en el Panel Docente.
+    Soporta documentos mixtos (etiquetando cada tarea con su Módulo auto-detectado
+    como [Matemáticas] o [Inglés]), permite elegir cuáles entran o subir todas de golpe.
+    """
+
+    MODULOS = ["Matemáticas", "Lenguaje", "Ciencias", "Inglés", "Hábitos y Orden"]
+
+    def __init__(
+        self,
+        parent,
+        nombre_archivo: str,
+        tareas_propuestas: List[Dict],
+        tema: Dict[str, str],
+        on_aprobar_lote: Callable[[List[Dict]], None],
+    ):
+        super().__init__(parent)
+        self.nombre_archivo = nombre_archivo
+        self.tareas_propuestas = list(tareas_propuestas or [])
+        self.tema = tema
+        self.on_aprobar_lote = on_aprobar_lote
+        self._filas_ui: List[Dict] = []
+
+        self.title(f"Tareas Detectadas en {nombre_archivo}")
+        self.geometry("760x560")
+        self.minsize(680, 480)
+        self.configure(fg_color=tema["bg_stage"])
+        self.transient(parent)
+
+        card = ctk.CTkFrame(
+            self,
+            fg_color=tema["card_bg"],
+            border_color=tema["card_border"],
+            border_width=2,
+            corner_radius=22,
+        )
+        card.pack(fill="both", expand=True, padx=16, pady=16)
+
+        cab = ctk.CTkFrame(card, fg_color="transparent")
+        cab.pack(fill="x", padx=18, pady=(14, 4))
+
+        ctk.CTkLabel(
+            cab,
+            text=f"  Guía Analizada: {nombre_archivo}",
+            image=icono_ctk("file_text", tema["btn_purple"], 20),
+            compound="left",
+            font=ctk.CTkFont(size=17, weight="bold"),
+            text_color=tema["text_primary"],
+        ).pack(side="left")
+
+        ctk.CTkLabel(
+            cab,
+            text=f"  Pensum guardado • {len(self.tareas_propuestas)} tareas propuestas",
+            image=icono_ctk("check", "#15803d", 15),
+            compound="left",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            text_color="#15803d",
+        ).pack(side="right")
+
+        ctk.CTkLabel(
+            card,
+            text=(
+                "Haru clasificó automáticamente el módulo de cada tarea ([Matemáticas], [Inglés], etc.). "
+                "Puedes ajustar cualquier título o módulo, marcar cuáles entran o subir todas de golpe:"
+            ),
+            font=ctk.CTkFont(size=12),
+            text_color=tema["text_secondary"],
+            justify="left",
+            anchor="w",
+            wraplength=700,
+        ).pack(fill="x", padx=18, pady=(0, 8))
+
+        self.lista_scroll = ctk.CTkScrollableFrame(
+            card,
+            fg_color=tema["card_inner"],
+            corner_radius=16,
+        )
+        self.lista_scroll.pack(fill="both", expand=True, padx=16, pady=(0, 10))
+
+        for idx, t in enumerate(self.tareas_propuestas, start=1):
+            item = ctk.CTkFrame(
+                self.lista_scroll,
+                fg_color=tema["card_bg"],
+                border_color=tema["card_border"],
+                border_width=1,
+                corner_radius=14,
+            )
+            item.pack(fill="x", padx=6, pady=5)
+
+            fila_top = ctk.CTkFrame(item, fg_color="transparent")
+            fila_top.pack(fill="x", padx=10, pady=(8, 4))
+
+            var_chk = ctk.BooleanVar(value=True)
+            chk = ctk.CTkCheckBox(
+                fila_top,
+                text=f"Tarea #{idx}",
+                variable=var_chk,
+                width=90,
+                font=ctk.CTkFont(size=12, weight="bold"),
+                text_color=tema["text_primary"],
+                fg_color=tema["btn_green"],
+            )
+            chk.pack(side="left", padx=(2, 8))
+
+            entry_tit = ctk.CTkEntry(
+                fila_top,
+                height=32,
+                corner_radius=10,
+                font=ctk.CTkFont(size=13, weight="bold"),
+            )
+            entry_tit.insert(0, str(t.get("nombre", f"Actividad {idx}")))
+            entry_tit.pack(side="left", fill="x", expand=True, padx=(0, 8))
+
+            cat_ini = str(t.get("categoria", "Matemáticas"))
+            if cat_ini not in self.MODULOS:
+                cat_ini = "Matemáticas"
+            combo_mod = ctk.CTkOptionMenu(
+                fila_top,
+                values=self.MODULOS,
+                width=155,
+                height=32,
+                corner_radius=10,
+                fg_color=tema["btn_purple"],
+                button_color=tema["btn_purple_hover"],
+                font=ctk.CTkFont(size=12, weight="bold"),
+            )
+            combo_mod.set(cat_ini)
+            combo_mod.pack(side="right")
+
+            pasos_preview = "  •  ".join(
+                f"P{i}: {p[:58]}" for i, p in enumerate(t.get("pasos", [])[:4], start=1)
+            )
+            ctk.CTkLabel(
+                item,
+                text=pasos_preview,
+                font=ctk.CTkFont(size=11),
+                text_color=tema["text_secondary"],
+                anchor="w",
+                justify="left",
+                wraplength=670,
+            ).pack(fill="x", padx=14, pady=(0, 8))
+
+            self._filas_ui.append({
+                "var_chk": var_chk,
+                "entry_tit": entry_tit,
+                "combo_mod": combo_mod,
+                "datos_base": t,
+            })
+
+        barra = ctk.CTkFrame(card, fg_color="transparent")
+        barra.pack(fill="x", padx=18, pady=(2, 14))
+
+        ctk.CTkButton(
+            barra,
+            text="Cancelar",
+            fg_color=tema["btn_stage_pill"],
+            hover_color=tema["btn_stage_pill_hover"],
+            corner_radius=14,
+            width=110,
+            height=38,
+            font=ctk.CTkFont(size=12, weight="bold"),
+            command=self.cerrar,
+        ).pack(side="left")
+
+        ctk.CTkButton(
+            barra,
+            text="Subir Todas de Golpe",
+            image=icono_ctk("sparkles", "#ffffff", 15),
+            compound="left",
+            fg_color=tema["btn_purple"],
+            hover_color=tema["btn_purple_hover"],
+            corner_radius=14,
+            width=195,
+            height=40,
+            font=ctk.CTkFont(size=13, weight="bold"),
+            command=lambda: self._confirmar_importacion(forzar_todas=True),
+        ).pack(side="right")
+
+        ctk.CTkButton(
+            barra,
+            text="Agregar Seleccionadas",
+            image=icono_ctk("check", "#ffffff", 15),
+            compound="left",
+            fg_color=tema["btn_green"],
+            hover_color=tema["btn_green_hover"],
+            corner_radius=14,
+            width=195,
+            height=40,
+            font=ctk.CTkFont(size=13, weight="bold"),
+            command=lambda: self._confirmar_importacion(forzar_todas=False),
+        ).pack(side="right", padx=8)
+
+        self.protocol("WM_DELETE_WINDOW", self.cerrar)
+        self.bind("<Escape>", lambda _e: self.cerrar())
+        self._after_foco_id = self.after(150, lambda: _fijar_foco_modal(self))
+
+    def _confirmar_importacion(self, forzar_todas: bool = False) -> None:
+        seleccionadas: List[Dict] = []
+        for fila in self._filas_ui:
+            if forzar_todas or fila["var_chk"].get():
+                base = dict(fila["datos_base"])
+                titulo = fila["entry_tit"].get().strip() or base.get("nombre", "Actividad Escolar")
+                base["nombre"] = titulo
+                base["categoria"] = fila["combo_mod"].get()
+                seleccionadas.append(base)
+        self.cerrar()
+        if seleccionadas and self.on_aprobar_lote:
+            self.on_aprobar_lote(seleccionadas)
+
+    def cerrar(self) -> None:
+        if getattr(self, "_after_foco_id", None):
+            try:
+                self.after_cancel(self._after_foco_id)
+            except Exception:
+                pass
+            self._after_foco_id = None
+        try:
+            self.grab_release()
+        except Exception:
+            pass
+        if self.winfo_exists():
+            self.destroy()
+

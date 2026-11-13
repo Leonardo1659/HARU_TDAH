@@ -86,13 +86,18 @@ flowchart TD
 * Python 3.10 o superior (compatible con Python 3.12 y 3.13).
 * No requiere Visual C++ Build Tools ni compiladores externos.
 
-### Instalación Rápida
-1. **Primera ejecución:** Ejecuta el archivo por lotes:
-   ```cmd
-   INSTALAR_DEPENDENCIAS.bat
+### Instalación y Ejecución
+1. **Desde código fuente (Python 3.10+):**
+   ```bash
+   python -m pip install -r requirements.txt
+   python main_haru_tdah.py
    ```
-2. **Iniciar la aplicación:**
-   * Haz doble clic en `INICIAR_HARU.vbs` (ejecución silenciosa sin ventana de consola) o `INICIAR_HARU.bat`.
+   *(También puedes abrir `haru.pyw` para iniciar sin ventana de consola).*
+
+2. **Compilar ejecutable portable `Haru.exe` (sin requerir Python en otras PCs):**
+   ```bash
+   python tools/compilar_exe.py
+   ```
 
 ---
 
@@ -102,8 +107,11 @@ flowchart TD
 # Diagnóstico integral del entorno (módulos, micrófono, motor de voz, base de datos y API)
 python tools/diagnostico.py
 
-# Ejecución de la suite completa de pruebas unitarias y de integración
+# Ejecución de la suite completa de pruebas unitarias y de integración (20/20 tests)
 python -m unittest discover -s tests -v
+
+# Compilación de Haru.exe autónomo en dist/Haru/
+python tools/compilar_exe.py
 
 # Generación del archivo portátil distribuible (excluye claves .env y bases .db)
 python tools/empaquetar_zip.py
@@ -117,28 +125,26 @@ python tools/empaquetar_zip.py
 HARU_TDAH/
 ├── haru.pyw                      # Lanzador gráfico en modo ventana (sin consola)
 ├── main_haru_tdah.py             # Punto de entrada estándar del proyecto
-├── INICIAR_HARU.vbs              # Inicio rápido con cero parpadeo de consola
-├── INICIAR_HARU.bat              # Script por lotes de arranque asistido
-├── INSTALAR_DEPENDENCIAS.bat     # Instalador automatizado de librerías
 ├── requirements.txt              # Especificación de dependencias de Python
 ├── .env.example                  # Plantilla de configuración de variables de entorno
 ├── .gitignore                    # Reglas de exclusión de credenciales y datos locales
 ├── core/                         # Lógica de negocio, base de datos y controladores
-│   ├── comprobacion_activa.py    # Motor de micro-validación contextual de pasos
-│   ├── config.py                 # Gestión de rutas y configuración general
+│   ├── archivos_estudio.py       # Lector local de guías/pensum (.pdf, .docx, .txt, .md, .csv)
+│   ├── comprobacion_activa.py    # Motor bilingüe de micro-validación contextual de pasos
+│   ├── config.py                 # Gestión de rutas (código fuente y PyInstaller _MEIPASS)
 │   ├── eventos.py                # Bus asíncrono y reactivo de eventos de UI
-│   ├── motor_tdah.py             # Máquina de estados pedagógica y temporización
-│   ├── repositorio_db.py         # Persistencia SQLite WAL, analítica y reportes
+│   ├── motor_tdah.py             # Máquina de estados pedagógica, Pomodoro y retención de foco
+│   ├── repositorio_db.py         # Persistencia SQLite WAL, 5 módulos, pensum y reportes
 │   ├── herramientas_multimodales.py # Síntesis de tonos y visión computacional
-│   ├── ia/                       # Evaluación AST, Ollama y conector REST de Gemini
+│   ├── ia/                       # Clasificador automático de módulos, AST, Ollama y Gemini REST
 │   └── voz/                      # Síntesis TTS fonética y reconocimiento de voz STT
 ├── ui/                           # Capa de presentación visual (CustomTkinter)
-│   ├── app.py                    # Ventana principal y coordinación del entorno
+│   ├── app.py                    # Ventana principal con filtro de Módulos y progreso (c/t)
 │   ├── avatar_sprite.py          # Renderizador del avatar 3D y cinemáticas
 │   ├── iconos.py                 # Motor vectorial offline y generador SVG
 │   ├── karaoke.py                # Visualizador de subtítulos sincronizados
-│   ├── modales.py                # Diálogos modales (PIN, Álbum, Comprobación y Voz)
-│   ├── panel_docente.py          # Dashboard de supervisión para docentes y familia
+│   ├── modales.py                # Diálogos modales (PIN, Álbum, Comprobación y Aprobador de Guías)
+│   ├── panel_docente.py          # Dashboard con 5 módulos, micrófono en vivo e ingesta de archivos
 │   ├── reto_colores_modal.py     # Componente sensorial con cámara web
 │   └── theme.py                  # Definición de paletas cromáticas (Calma, Día, Noche)
 ├── hardware/                     # Controladores de periféricos externos
@@ -147,8 +153,9 @@ HARU_TDAH/
 │   └── barra_progreso_tdah.ino   # Código C++ para semáforo físico de LEDs
 ├── tests/                        # Batería de pruebas automatizadas
 │   ├── test_motor_tdah.py        # Pruebas del motor pedagógico y base de datos
-│   └── test_auditoria_integral.py# Pruebas integrales de seguridad, UI e iconografía
+│   └── test_auditoria_integral.py# Pruebas integrales de seguridad, módulos, documentos y UI
 └── tools/                        # Utilidades auxiliares
+    ├── compilar_exe.py           # Compilador automatizado de Haru.exe (PyInstaller)
     ├── diagnostico.py            # Script de comprobación de salud del sistema
     ├── pregenerar_voz_offline.py # Generador de banco de voz neuronal en caché
     └── empaquetar_zip.py         # Empacador seguro para distribución

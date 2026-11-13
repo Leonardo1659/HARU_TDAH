@@ -12,7 +12,7 @@ import array
 import math
 import threading
 import time
-from typing import Optional
+from typing import Callable, Optional
 
 from core.eventos import BusEventosUI
 
@@ -49,33 +49,50 @@ class EscuchaVozHaru:
         except Exception:
             return False
 
-    def escuchar_en_hilo(self) -> None:
+    def escuchar_en_hilo(
+        self,
+        callback_resultado: Optional[Callable[[str], None]] = None,
+        callback_estado: Optional[Callable[[str, str], None]] = None,
+    ) -> None:
         if self.escuchando:
             return
-        threading.Thread(target=self._capturar_y_transcribir, daemon=True, name="HaruSTTWorker").start()
+        threading.Thread(
+            target=self._capturar_y_transcribir,
+            args=(callback_resultado, callback_estado),
+            daemon=True,
+            name="HaruSTTWorker",
+        ).start()
 
     def _emitir(self, tipo: str, **datos) -> None:
         if self.bus:
             self.bus.emitir(tipo, **datos)
 
-    def _capturar_y_transcribir(self) -> None:
+    def _capturar_y_transcribir(
+        self,
+        callback_resultado: Optional[Callable[[str], None]] = None,
+        callback_estado: Optional[Callable[[str, str], None]] = None,
+    ) -> None:
         if self.forzar_modo_privado:
-            # Cumplimiento estricto Ley N.º 548: en Modo Privado no se envía audio a servidores externos
-            self._emitir(
-                "stt_fallback_texto",
-                motivo="Modo Privado Estricto activo (Ley N.º 548): el micrófono en la nube está desactivado.",
-            )
+            motivo = "Modo Privado Estricto activo (Ley N.º 548): el micrófono en la nube está desactivado."
+            if callback_estado:
+                callback_estado("error", motivo)
+            else:
+                self._emitir("stt_fallback_texto", motivo=motivo)
             return
 
         if not SOUNDDEVICE_DISPONIBLE or not SR_DISPONIBLE or not self.hay_microfono_disponible():
-            self._emitir(
-                "stt_fallback_texto",
-                motivo="No se detectó un micrófono activo en esta computadora.",
-            )
+            motivo = "No se detectó un micrófono activo en esta computadora."
+            if callback_estado:
+                callback_estado("error", motivo)
+            else:
+                self._emitir("stt_fallback_texto", motivo=motivo)
             return
 
         self.escuchando = True
-        self._emitir("stt_inicio")
+        if callback_estado:
+            callback_estado("escuchando", "Escuchando...")
+        else:
+            self._emitir("stt_inicio")
         buffer_pcm = bytearray()
         hubo_voz = False
         bloques_silencio_tras_voz = 0
@@ -103,7 +120,8 @@ class EscuchaVozHaru:
                         rms = 0.0
 
                     nivel = min(1.0, rms / 3200.0)
-                    self._emitir("stt_nivel", nivel=nivel)
+                    if not callback_estado:
+                        self._emitir("stt_nivel", nivel=nivel)
 
                     if rms > 420:
                         hubo_voz = True
@@ -115,26 +133,45 @@ class EscuchaVozHaru:
                             break
         except Exception as e:
             self.escuchando = False
-            self._emitir("stt_fallback_texto", motivo=f"Micrófono ocupado o no disponible ({e}).")
+            motivo = f"Micrófono ocupado o no disponible ({e})."
+            if callback_estado:
+                callback_estado("error", motivo)
+            else:
+                self._emitir("stt_fallback_texto", motivo=motivo)
             return
 
         self.escuchando = False
-        self._emitir("stt_procesando")
+        if callback_estado:
+            callback_estado("procesando", "Transcribiendo...")
+        else:
+            self._emitir("stt_procesando")
 
         if not buffer_pcm or not hubo_voz:
-            self._emitir("stt_vacio", mensaje="No escuché tu voz. ¡Puedes intentar otra vez o tocar los botones!")
+            msg_vacio = "No escuché tu voz. ¡Puedes intentar otra vez o tocar los botones!"
+            if callback_estado:
+                callback_estado("vacio", msg_vacio)
+            else:
+                self._emitir("stt_vacio", mensaje=msg_vacio)
             return
 
         try:
             recognizer = sr.Recognizer()
             audio_data = sr.AudioData(bytes(buffer_pcm), self.SAMPLE_RATE, 2)
-            texto = recognizer.recognize_google(audio_data, language="es-BO")
-            self._emitir("stt_resultado", texto=texto.strip())
+            texto = recognizer.recognize_google(audio_data, language="es-BO").strip()
+            if callback_resultado:
+                callback_resultado(texto)
+            else:
+                self._emitir("stt_resultado", texto=texto)
         except sr.UnknownValueError:
-            self._emitir("stt_vacio", mensaje="No logré entender bien. ¡Dímelo un poquito más cerca o usa los botones!")
+            msg_err = "No logré entender bien. ¡Dímelo un poquito más cerca!"
+            if callback_estado:
+                callback_estado("vacio", msg_err)
+            else:
+                self._emitir("stt_vacio", mensaje=msg_err)
         except Exception:
-            self._emitir(
-                "stt_fallback_texto",
-                motivo="Sin conexión al servicio de transcripción por voz; escribe aquí tu mensaje para Haru:",
-            )
+            motivo = "Sin conexión al servicio de transcripción por voz; escribe aquí tu mensaje:"
+            if callback_estado:
+                callback_estado("error", motivo)
+            else:
+                self._emitir("stt_fallback_texto", motivo=motivo)
 

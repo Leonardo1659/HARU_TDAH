@@ -3,13 +3,19 @@
 *.env
 !.env.example
 
-# Bases de datos SQLite locales y cachés
+# Bases de datos SQLite locales, bitácoras y cachés
 *.db
 *.sqlite
 *.sqlite3
+*.log
 data/*.db
+data/logs/
 data/cache_tts/
 data/reportes/
+
+# Paquetes portables generados localmente
+HARU_TDAH_Compartir.zip
+*.zip
 
 # Python y compilados
 __pycache__/

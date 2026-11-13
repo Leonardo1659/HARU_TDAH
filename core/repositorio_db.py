@@ -61,6 +61,13 @@ class RepositorioTDAH:
     PBKDF2_ITERATIONS = 120_000
     MAX_INTENTOS_PIN = 3
     SEGUNDOS_BLOQUEO_PIN = 45
+    MODULOS_CURRICULARES = (
+        "Matemáticas",
+        "Lenguaje",
+        "Ciencias",
+        "Inglés",
+        "Hábitos y Orden",
+    )
     RECOMPENSAS_SUGERIDAS = [
         ("5 min de dibujo o plastilina libre", 6, "Recompensa rápida alcanzable tras tu primera misión completada."),
         ("Escuchar mi canción favorita", 10, "Elegir una canción alegre en casa o en el aula."),
@@ -182,6 +189,16 @@ class RepositorioTDAH:
                     costo_estrellas INTEGER NOT NULL
                 )
             """)
+
+            # 8. Contexto curricular / Pensum escolar por módulo cargado desde documentos del tutor
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS pensum_modulos (
+                    categoria TEXT PRIMARY KEY,
+                    nombre_archivo TEXT NOT NULL,
+                    contenido_resumen TEXT NOT NULL,
+                    fecha_actualizacion TEXT NOT NULL
+                )
+            """)
             conn.commit()
 
     TAREAS_BASE = [
@@ -243,6 +260,22 @@ class RepositorioTDAH:
                 "¡Ya casi terminas! Poner la mochila en su lugar te ahorrará tiempo mañana.",
             ],
         },
+        {
+            "nombre": "Inglés - Jugando con Palabras",
+            "categoria": "Inglés",
+            "pasos": [
+                "¡Hello! Vamos a aprender inglés. Primero, saca tu cuaderno y ponte cómodo en tu silla para empezar.",
+                "Busca algo de color azul cerca de ti y tócalo. Azul en inglés se dice BLUE. ¡Repite conmigo: BLUE!",
+                "Ahora, haz el sonido de un gatito. ¡Miau! Gato en inglés se dice CAT. ¡Dilo muy fuerte: CAT!",
+                "¡You are a champion! Para terminar, da tres aplausos mientras cuentas: One, Two, Three! ¡Y guarda tu cuaderno!",
+            ],
+            "pistas": [
+                "Solo necesitas tu cuaderno de inglés y estar bien sentado.",
+                "Puede ser un lápiz, un juguete o tu ropa que sea de color blue (azul).",
+                "Imagina que eres un gatito (cat) y haz su sonido.",
+                "One es uno, Two es dos, Three es tres. ¡Aplaude en cada número y luego guarda tus cosas!",
+            ],
+        },
     ]
 
     def _sembrar_datos_iniciales(self):
@@ -278,20 +311,33 @@ class RepositorioTDAH:
             ("adivinanza", "Motivación", "¡Adivina adivinador! Blanca por dentro, verde por fuera; si quieres que te lo diga, es-pera. ¡La pera!"),
             ("cuento", "Motivación", "Había una vez una pequeña estrellita andina que brillaba poquito, pero dando un pasito cada noche iluminó todo el cielo de Bolivia."),
             ("dinosaurio", "Ciencias", "Los dinosaurios vivieron hace millones de años; algunos como el Triceratops comían plantas y en Sucre, Bolivia, ¡hay miles de sus huellas en Cal Orck'o!"),
-            ("dinosaurios", "Ciencias", "Los dinosaurios vivieron hace millones de años; algunos como el Triceratops comían plantas y en Sucre, Bolivia, ¡hay miles de sus huellas en Cal Orck'o!")
+            ("dinosaurios", "Ciencias", "Los dinosaurios vivieron hace millones de años; algunos como el Triceratops comían plantas y en Sucre, Bolivia, ¡hay miles de sus huellas en Cal Orck'o!"),
+            ("ingles", "Inglés", "¡En inglés podemos jugar con colores y animales! Por ejemplo: azul es BLUE, rojo es RED, gato es CAT, perro es DOG y contamos One, Two, Three."),
+            ("inglés", "Inglés", "¡En inglés podemos jugar con colores y animales! Por ejemplo: azul es BLUE, rojo es RED, gato es CAT, perro es DOG y contamos One, Two, Three."),
+            ("colores en ingles", "Inglés", "Los colores básicos en inglés son: Azul = BLUE, Rojo = RED, Amarillo = YELLOW, Verde = GREEN. ¡Repítelos conmigo!"),
+            ("numeros en ingles", "Inglés", "Del 1 al 5 en inglés se cuenta así: One (1), Two (2), Three (3), Four (4), Five (5). ¡You are a champion!"),
         ]
 
         with self._conectar() as conn:
             cursor = conn.cursor()
+            ahora = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             cursor.execute("SELECT COUNT(*) as total FROM tareas")
             if cursor.fetchone()["total"] == 0:
-                ahora = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 for t in tareas_base:
                     cursor.execute("""
                         INSERT INTO tareas (nombre, categoria, pasos_json, pistas_json, es_predeterminada, fecha_creacion)
                         VALUES (?, ?, ?, ?, 1, ?)
                     """, (t["nombre"], t["categoria"], json.dumps(t["pasos"], ensure_ascii=False),
                           json.dumps(t["pistas"], ensure_ascii=False), ahora))
+            else:
+                # Asegurar que el 5.º módulo curricular (Inglés) esté disponible en bases previas
+                for t in tareas_base:
+                    if t["categoria"] == "Inglés":
+                        cursor.execute("""
+                            INSERT OR IGNORE INTO tareas (nombre, categoria, pasos_json, pistas_json, es_predeterminada, fecha_creacion)
+                            VALUES (?, ?, ?, ?, 1, ?)
+                        """, (t["nombre"], t["categoria"], json.dumps(t["pasos"], ensure_ascii=False),
+                              json.dumps(t["pistas"], ensure_ascii=False), ahora))
 
             preferencias_defecto = {
                 "schema_version": self.SCHEMA_VERSION,
@@ -448,7 +494,25 @@ class RepositorioTDAH:
         self.guardar_preferencia("pin_intentos_fallidos", "0")
         self.guardar_preferencia("pin_bloqueado_hasta", "0")
 
-    # --- GESTIÓN DE TAREAS ---
+    # --- GESTIÓN DE MÓDULOS CURRICULARES, TAREAS Y PENSUM ---
+    def normalizar_modulo(self, categoria: str) -> str:
+        """Unifica nombres de categorías hacia los 5 Módulos Curriculares oficiales."""
+        cat = _quitar_tildes((categoria or "").strip().lower())
+        if any(k in cat for k in ("ingl", "english")):
+            return "Inglés"
+        if any(k in cat for k in ("matem", "aritmet", "calcul")):
+            return "Matemáticas"
+        if any(k in cat for k in ("lengu", "lectur", "comunic")):
+            return "Lenguaje"
+        if any(k in cat for k in ("cienc", "natural", "social", "biolog")):
+            return "Ciencias"
+        if any(k in cat for k in ("habit", "orden", "organiz", "rutin")):
+            return "Hábitos y Orden"
+        for mod in self.MODULOS_CURRICULARES:
+            if _quitar_tildes(mod.lower()) == cat:
+                return mod
+        return (categoria or "Matemáticas").strip() or "Matemáticas"
+
     def listar_tareas(self) -> List[Dict]:
         with self._conectar() as conn:
             cursor = conn.cursor()
@@ -459,12 +523,90 @@ class RepositorioTDAH:
                 resultado.append({
                     "id": f["id"],
                     "nombre": f["nombre"],
-                    "categoria": f["categoria"],
+                    "categoria": self.normalizar_modulo(f["categoria"]),
                     "pasos": json.loads(f["pasos_json"]),
                     "pistas": json.loads(f["pistas_json"]),
                     "es_predeterminada": bool(f["es_predeterminada"])
                 })
             return resultado
+
+    def listar_tareas_por_modulo(self, categoria: str) -> List[Dict]:
+        """Filtra las misiones pertenecientes a un Módulo Curricular específico."""
+        todas = self.listar_tareas()
+        if not categoria or categoria.strip().lower() in ("todos", "todas", ""):
+            return todas
+        mod_norm = self.normalizar_modulo(categoria)
+        return [t for t in todas if self.normalizar_modulo(t.get("categoria", "")) == mod_norm]
+
+    def obtener_progreso_modulos(self) -> Dict[str, Tuple[int, int]]:
+        """
+        Retorna `{modulo: (misiones_completadas, total_misiones)}` para el indicador
+        visual de progreso por módulo en la vista del estudiante y en el Panel Docente.
+        """
+        tareas = self.listar_tareas()
+        with self._conectar() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT DISTINCT LOWER(nombre_tarea) AS nt FROM sesiones_estudio WHERE estado_final = 'COMPLETADA'"
+            )
+            completadas_set = {row["nt"] for row in cursor.fetchall() if row["nt"]}
+
+        progreso: Dict[str, Tuple[int, int]] = {}
+        for mod in self.MODULOS_CURRICULARES:
+            tareas_mod = [t for t in tareas if self.normalizar_modulo(t.get("categoria", "")) == mod]
+            total = len(tareas_mod)
+            hechas = sum(1 for t in tareas_mod if t["nombre"].lower() in completadas_set)
+            progreso[mod] = (hechas, total)
+        return progreso
+
+    def guardar_pensum_modulo(self, categoria: str, nombre_archivo: str, texto: str) -> None:
+        """Guarda el resumen del pensum o guía escolar de un módulo en SQLite."""
+        mod = self.normalizar_modulo(categoria)
+        resumen = re.sub(r"\s+", " ", (texto or "")).strip()[:2400]
+        if not resumen:
+            return
+        ahora = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with self._conectar() as conn:
+            conn.execute("""
+                INSERT INTO pensum_modulos (categoria, nombre_archivo, contenido_resumen, fecha_actualizacion)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(categoria) DO UPDATE SET
+                    nombre_archivo = excluded.nombre_archivo,
+                    contenido_resumen = excluded.contenido_resumen,
+                    fecha_actualizacion = excluded.fecha_actualizacion
+            """, (mod, (nombre_archivo or "Guia_Escolar").strip()[:120], resumen, ahora))
+            conn.commit()
+
+    def obtener_pensum_modulo(self, categoria: str) -> Optional[Dict[str, str]]:
+        """Recupera el pensum/contexto escolar guardado para el módulo indicado."""
+        mod = self.normalizar_modulo(categoria)
+        with self._conectar() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT categoria, nombre_archivo, contenido_resumen, fecha_actualizacion "
+                "FROM pensum_modulos WHERE categoria = ?",
+                (mod,),
+            )
+            fila = cursor.fetchone()
+            return dict(fila) if fila else None
+
+    def guardar_lote_tareas(
+        self, lista_tareas: List[Dict], categoria_defecto: str = "Matemáticas"
+    ) -> int:
+        """
+        Guarda en bloque múltiples tareas extraídas de un documento (incluso documentos mixtos,
+        respetando la categoría individual detectada en cada tarea).
+        Retorna la cantidad de tareas guardadas con éxito.
+        """
+        guardadas = 0
+        for item in lista_tareas or []:
+            nombre = str(item.get("nombre", "")).strip()
+            pasos = item.get("pasos") or []
+            pistas = item.get("pistas") or []
+            cat = self.normalizar_modulo(str(item.get("categoria") or categoria_defecto))
+            if nombre and pasos and self.guardar_tarea(nombre, pasos, pistas, categoria=cat):
+                guardadas += 1
+        return guardadas
 
     def obtener_tarea(self, nombre: str) -> Optional[Dict]:
         for t in self.listar_tareas():

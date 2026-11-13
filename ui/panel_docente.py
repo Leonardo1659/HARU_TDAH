@@ -18,8 +18,10 @@ from typing import Callable, Dict, List, Optional
 
 import customtkinter as ctk
 
+from core.archivos_estudio import cargar_archivo_estudio
 from core.config import VOCES_DISPONIBLES
-from ui.iconos import icono_ctk
+from ui.iconos import aplicar_icono_ventana_haru, icono_ctk
+from ui.modales import ModalAprobadorTareasDocumento
 
 
 class PanelDocente(ctk.CTkToplevel):
@@ -28,6 +30,7 @@ class PanelDocente(ctk.CTkToplevel):
                  tema: Optional[Dict[str, str]] = None,
                  callback_recargar: Optional[Callable[[], None]] = None):
         super().__init__(parent)
+        aplicar_icono_ventana_haru(self)
         self.motor = motor_tdah
         self.db = repositorio_db or getattr(motor_tdah, "db", None)
         self.ia = motor_ia or getattr(motor_tdah, "ia", None)
@@ -49,6 +52,8 @@ class PanelDocente(ctk.CTkToplevel):
         self.tareas_cache: Dict[str, Dict] = {}
         self._pasos_borrador: List[Dict[str, str]] = []
         self._seccion_activa = ""
+        self.modulo_activo = "Todos"
+        self._botones_modulo: Dict[str, ctk.CTkButton] = {}
         self._botones_nav: Dict[str, ctk.CTkButton] = {}
         self._status_toast_after = None
 
@@ -56,9 +61,10 @@ class PanelDocente(ctk.CTkToplevel):
         self._construir_estructura_principal()
         self.mostrar_seccion("misiones")
 
-        self.after(160, self._fijar_foco_windows)
+        self._after_foco_id = self.after(160, self._fijar_foco_windows)
 
     def _fijar_foco_windows(self) -> None:
+        self._after_foco_id = None
         if not self.winfo_exists():
             return
         try:
@@ -203,6 +209,12 @@ class PanelDocente(ctk.CTkToplevel):
         )
 
     def cerrar_panel(self) -> None:
+        if getattr(self, "_after_foco_id", None):
+            try:
+                self.after_cancel(self._after_foco_id)
+            except Exception:
+                pass
+            self._after_foco_id = None
         if self._status_toast_after:
             try:
                 self.after_cancel(self._status_toast_after)
@@ -240,12 +252,54 @@ class PanelDocente(ctk.CTkToplevel):
     # =========================================================================
     # SECCIÓN 1: MISIONES ESCOLARES Y CONSTRUCTOR VISUAL DE MICRO-PASOS
     # =========================================================================
+    MODULOS_CURRICULARES = ("Matemáticas", "Lenguaje", "Ciencias", "Inglés", "Hábitos y Orden")
+
     def _vista_misiones(self) -> None:
         marco = ctk.CTkFrame(self.contenedor, fg_color="transparent")
         marco.grid(row=0, column=0, sticky="nsew")
         marco.grid_columnconfigure(0, weight=0, minsize=255)
         marco.grid_columnconfigure(1, weight=1)
-        marco.grid_rowconfigure(0, weight=1)
+        marco.grid_rowconfigure(0, weight=0)
+        marco.grid_rowconfigure(1, weight=1)
+
+        # Barra Superior de 5 Módulos Curriculares + Progreso Visual + Subir Archivo/Pensum
+        barra_modulos = ctk.CTkFrame(
+            marco,
+            fg_color=self.tema["card_bg"],
+            border_color=self.tema["card_border"],
+            border_width=2,
+            corner_radius=18,
+        )
+        barra_modulos.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 10))
+
+        ctk.CTkLabel(
+            barra_modulos,
+            text="  Módulos:",
+            image=icono_ctk("folder", self.tema["text_primary"], 16),
+            compound="left",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            text_color=self.tema["text_primary"],
+        ).pack(side="left", padx=(12, 6), pady=8)
+
+        self.contenedor_pills_modulos = ctk.CTkFrame(barra_modulos, fg_color="transparent")
+        self.contenedor_pills_modulos.pack(side="left", fill="x", expand=True, pady=6)
+        self._botones_modulo = {}
+        self._refrescar_barra_modulos()
+
+        self.btn_subir_archivo = ctk.CTkButton(
+            barra_modulos,
+            text="Subir Archivo / Pensum",
+            image=icono_ctk("file_text", "#ffffff", 15),
+            compound="left",
+            fg_color=self.tema["btn_purple"],
+            hover_color=self.tema["btn_purple_hover"],
+            corner_radius=14,
+            height=34,
+            width=192,
+            font=ctk.CTkFont(size=12, weight="bold"),
+            command=self._accion_subir_archivo_pensum,
+        )
+        self.btn_subir_archivo.pack(side="right", padx=12, pady=6)
 
         # Columna Izquierda: Lista de misiones disponibles
         col_izq = ctk.CTkFrame(
@@ -255,20 +309,21 @@ class PanelDocente(ctk.CTkToplevel):
             border_width=2,
             corner_radius=20,
         )
-        col_izq.grid(row=0, column=0, sticky="nsew", padx=(0, 12))
+        col_izq.grid(row=1, column=0, sticky="nsew", padx=(0, 12))
 
-        ctk.CTkLabel(
+        self.lbl_titulo_catalogo = ctk.CTkLabel(
             col_izq,
             text="  Catálogo de Misiones",
             image=icono_ctk("clipboard", self.tema["text_primary"], 18),
             compound="left",
             font=ctk.CTkFont(size=17, weight="bold"),
             text_color=self.tema["text_primary"],
-        ).pack(anchor="w", padx=16, pady=(14, 2))
+        )
+        self.lbl_titulo_catalogo.pack(anchor="w", padx=16, pady=(14, 2))
 
         ctk.CTkLabel(
             col_izq,
-            text="Toca una misión para editarla o enviarla a Haru:",
+            text="Toca un módulo arriba o una misión para editarla:",
             font=ctk.CTkFont(size=12),
             text_color=self.tema["text_secondary"],
         ).pack(anchor="w", padx=16, pady=(0, 8))
@@ -316,11 +371,11 @@ class PanelDocente(ctk.CTkToplevel):
             border_width=2,
             corner_radius=20,
         )
-        col_der.grid(row=0, column=1, sticky="nsew")
+        col_der.grid(row=1, column=1, sticky="nsew")
         col_der.grid_columnconfigure(0, weight=1)
         col_der.grid_rowconfigure(2, weight=1)
 
-        # 1. Generador automático con IA
+        # 1. Generador automático con IA + Micrófono Docente en Vivo
         caja_ia = ctk.CTkFrame(
             col_der,
             fg_color=self.tema["hint_bg"],
@@ -333,22 +388,37 @@ class PanelDocente(ctk.CTkToplevel):
 
         ctk.CTkLabel(
             caja_ia,
-            text="  Generador IA: escribe un tema escolar para autocompletar pasos y pistas",
+            text="  Generador IA: escribe o dicta con el micrófono un tema y Haru elegirá su módulo automáticamente",
             image=icono_ctk("sparkles", self.tema["btn_purple"], 16),
             compound="left",
             font=ctk.CTkFont(size=12, weight="bold"),
             text_color=self.tema["text_primary"],
             anchor="w",
-        ).grid(row=0, column=0, columnspan=2, sticky="w", padx=12, pady=(8, 4))
+        ).grid(row=0, column=0, columnspan=3, sticky="w", padx=12, pady=(8, 4))
 
         self.entry_tema_ia = ctk.CTkEntry(
             caja_ia,
-            placeholder_text="Ej: Sumas llevando de dos cifras / Los planetas del Sistema Solar...",
+            placeholder_text="Ej: Sumas llevando / Colors and animals in English / El ciclo del agua...",
             height=36,
             corner_radius=12,
         )
-        self.entry_tema_ia.grid(row=1, column=0, sticky="ew", padx=(12, 8), pady=(0, 10))
+        self.entry_tema_ia.grid(row=1, column=0, sticky="ew", padx=(12, 6), pady=(0, 10))
         self.entry_tema_ia.bind("<Return>", lambda _e: self._generar_pasos_con_ia())
+
+        self.btn_dictar_ia = ctk.CTkButton(
+            caja_ia,
+            text="Dictar",
+            image=icono_ctk("mic", "#ffffff", 15),
+            compound="left",
+            fg_color=self.tema["btn_stage_pill"],
+            hover_color=self.tema["btn_stage_pill_hover"],
+            corner_radius=12,
+            height=36,
+            width=96,
+            font=ctk.CTkFont(size=12, weight="bold"),
+            command=self._dictar_tema_ia_microfono,
+        )
+        self.btn_dictar_ia.grid(row=1, column=1, padx=(0, 6), pady=(0, 10))
 
         self.btn_generar_ia = ctk.CTkButton(
             caja_ia,
@@ -359,13 +429,13 @@ class PanelDocente(ctk.CTkToplevel):
             hover_color=self.tema["btn_purple_hover"],
             corner_radius=12,
             height=36,
-            width=155,
+            width=148,
             font=ctk.CTkFont(size=13, weight="bold"),
             command=self._generar_pasos_con_ia,
         )
-        self.btn_generar_ia.grid(row=1, column=1, padx=(0, 12), pady=(0, 10))
+        self.btn_generar_ia.grid(row=1, column=2, padx=(0, 12), pady=(0, 10))
 
-        # 2. Datos básicos (Nombre y Materia)
+        # 2. Datos básicos (Nombre y Módulo Curricular)
         fila_meta = ctk.CTkFrame(col_der, fg_color="transparent")
         fila_meta.grid(row=1, column=0, sticky="ew", padx=16, pady=4)
         fila_meta.grid_columnconfigure(0, weight=1)
@@ -381,12 +451,13 @@ class PanelDocente(ctk.CTkToplevel):
 
         self.combo_categoria = ctk.CTkOptionMenu(
             fila_meta,
-            values=["Matemáticas", "Lenguaje", "Ciencias", "Hábitos y Orden", "Estudios Sociales", "Arte", "Personalizada"],
+            values=["Matemáticas", "Lenguaje", "Ciencias", "Inglés", "Hábitos y Orden"],
             width=165,
             height=38,
             corner_radius=12,
             fg_color=self.tema["btn_stage_pill"],
             button_color=self.tema["btn_stage_pill_hover"],
+            command=lambda mod: self.seleccionar_modulo_curricular(mod, cargar_primera=False),
         )
         self.combo_categoria.grid(row=0, column=1)
 
@@ -471,12 +542,76 @@ class PanelDocente(ctk.CTkToplevel):
         else:
             self._preparar_nueva_mision()
 
+    def _refrescar_barra_modulos(self) -> None:
+        if not hasattr(self, "contenedor_pills_modulos") or not self.contenedor_pills_modulos.winfo_exists():
+            return
+        for w in self.contenedor_pills_modulos.winfo_children():
+            w.destroy()
+        self._botones_modulo = {}
+
+        progreso = (
+            self.db.obtener_progreso_modulos()
+            if (self.db and hasattr(self.db, "obtener_progreso_modulos"))
+            else {m: (0, 1) for m in self.MODULOS_CURRICULARES}
+        )
+
+        opciones = [("Todos", "Todos")]
+        for mod in self.MODULOS_CURRICULARES:
+            hechas, total = progreso.get(mod, (0, 0))
+            etq_corta = "Hábitos" if mod == "Hábitos y Orden" else mod
+            opciones.append((mod, f"{etq_corta} ({hechas}/{total})"))
+
+        for clave_mod, texto_btn in opciones:
+            activo = self.modulo_activo == clave_mod
+            btn = ctk.CTkButton(
+                self.contenedor_pills_modulos,
+                text=texto_btn,
+                height=30,
+                corner_radius=12,
+                fg_color=self.tema["btn_green"] if activo else self.tema["btn_stage_pill"],
+                hover_color=self.tema["btn_green_hover"] if activo else self.tema["btn_stage_pill_hover"],
+                font=ctk.CTkFont(size=11, weight="bold"),
+                command=lambda m=clave_mod: self.seleccionar_modulo_curricular(m, cargar_primera=True),
+            )
+            btn.pack(side="left", padx=3)
+            self._botones_modulo[clave_mod] = btn
+
+    def seleccionar_modulo_curricular(self, modulo: str, cargar_primera: bool = True) -> None:
+        """Filtra el catálogo para mostrar únicamente las tareas del Módulo Curricular elegido."""
+        if modulo != "Todos" and self.db and hasattr(self.db, "normalizar_modulo"):
+            modulo = self.db.normalizar_modulo(modulo)
+        self.modulo_activo = modulo
+        if hasattr(self, "combo_categoria") and self.combo_categoria.winfo_exists() and modulo in self.MODULOS_CURRICULARES:
+            self.combo_categoria.set(modulo)
+        if hasattr(self, "lbl_titulo_catalogo") and self.lbl_titulo_catalogo.winfo_exists():
+            sufijo = "" if modulo == "Todos" else f": {modulo}"
+            self.lbl_titulo_catalogo.configure(text=f"  Misiones{sufijo}")
+        self._poblar_lista_catalogo()
+        if cargar_primera and modulo != "Todos":
+            tareas_mod = [
+                d for d in self.tareas_cache.values()
+                if (self.db.normalizar_modulo(d.get("categoria", "")) if self.db else d.get("categoria")) == modulo
+            ]
+            if tareas_mod:
+                self._cargar_mision_en_editor(tareas_mod[0])
+
     def _poblar_lista_catalogo(self) -> None:
+        if not hasattr(self, "scroll_catalogo") or not self.scroll_catalogo.winfo_exists():
+            return
         for w in self.scroll_catalogo.winfo_children():
             w.destroy()
         self._recargar_cache_tareas()
+        self._refrescar_barra_modulos()
 
         for nombre, datos in self.tareas_cache.items():
+            cat_norm = (
+                self.db.normalizar_modulo(datos.get("categoria", ""))
+                if (self.db and hasattr(self.db, "normalizar_modulo"))
+                else datos.get("categoria", "")
+            )
+            if self.modulo_activo != "Todos" and cat_norm != self.modulo_activo:
+                continue
+
             es_activa = nombre == self.motor.tarea_actual
             item = ctk.CTkFrame(
                 self.scroll_catalogo,
@@ -504,7 +639,7 @@ class PanelDocente(ctk.CTkToplevel):
 
             ctk.CTkLabel(
                 pie,
-                text=f"{datos['categoria']} • {len(datos['pasos'])} pasos",
+                text=f"{cat_norm} • {len(datos['pasos'])} pasos",
                 font=ctk.CTkFont(size=11),
                 text_color=self.tema["text_secondary"],
             ).pack(side="left")
@@ -523,7 +658,8 @@ class PanelDocente(ctk.CTkToplevel):
 
     def _preparar_nueva_mision(self) -> None:
         self.entry_nombre_tarea.delete(0, "end")
-        self.combo_categoria.set("Personalizada")
+        cat_inicial = self.modulo_activo if self.modulo_activo in self.MODULOS_CURRICULARES else "Matemáticas"
+        self.combo_categoria.set(cat_inicial)
         self._pasos_borrador = [
             {"paso": "Prepara sobre tu mesa solo el cuaderno y lápiz que usarás.", "pista": "Guarda otros objetos para evitar distracciones."},
             {"paso": "Realiza la primera parte del ejercicio con calma.", "pista": "Si tienes dudas, usa la barra de preguntas de Haru IA."},
@@ -534,7 +670,12 @@ class PanelDocente(ctk.CTkToplevel):
     def _cargar_mision_en_editor(self, datos: Dict) -> None:
         self.entry_nombre_tarea.delete(0, "end")
         self.entry_nombre_tarea.insert(0, datos["nombre"])
-        self.combo_categoria.set(datos.get("categoria", "Personalizada"))
+        cat_norm = (
+            self.db.normalizar_modulo(datos.get("categoria", "Matemáticas"))
+            if (self.db and hasattr(self.db, "normalizar_modulo"))
+            else datos.get("categoria", "Matemáticas")
+        )
+        self.combo_categoria.set(cat_norm)
         pasos = datos.get("pasos", [])
         pistas = datos.get("pistas", [])
         self._pasos_borrador = [
@@ -645,35 +786,157 @@ class PanelDocente(ctk.CTkToplevel):
             )
             self._renderizar_tarjetas_pasos()
 
+    def _dictar_tema_ia_microfono(self) -> None:
+        """Permite al docente dictar por micrófono el tema de la tarea para autogenerar pasos y módulo."""
+        if self.voz:
+            self.voz.detener()
+        if not self.stt:
+            self.notificar("El módulo de micrófono no está disponible en esta sesión.")
+            return
+
+        def _al_estado(tipo_est: str, msg: str) -> None:
+            def _ui_est():
+                if not self.winfo_exists() or not hasattr(self, "btn_dictar_ia"):
+                    return
+                if tipo_est == "escuchando":
+                    self.btn_dictar_ia.configure(text="Escuchando...", fg_color="#dc2626")
+                    self.notificar("Habla ahora: di el tema de la tarea escolar...")
+                elif tipo_est == "procesando":
+                    self.btn_dictar_ia.configure(text="Pensando...", fg_color=self.tema["btn_orange"])
+                else:
+                    self.btn_dictar_ia.configure(text="Dictar", fg_color=self.tema["btn_stage_pill"])
+                    self.notificar(msg)
+
+            self.after(0, _ui_est)
+
+        def _al_resultado(texto_dictado: str) -> None:
+            def _ui_res():
+                if not self.winfo_exists() or not hasattr(self, "btn_dictar_ia"):
+                    return
+                self.btn_dictar_ia.configure(text="Dictar", fg_color=self.tema["btn_stage_pill"])
+                limpio = (texto_dictado or "").strip()
+                if limpio:
+                    self.entry_tema_ia.delete(0, "end")
+                    self.entry_tema_ia.insert(0, limpio)
+                    self.entry_nombre_tarea.delete(0, "end")
+                    self.entry_nombre_tarea.insert(0, limpio)
+                    self._generar_pasos_con_ia()
+
+            self.after(0, _ui_res)
+
+        self.stt.escuchar_en_hilo(callback_resultado=_al_resultado, callback_estado=_al_estado)
+
     def _generar_pasos_con_ia(self) -> None:
         tema = self.entry_tema_ia.get().strip() or self.entry_nombre_tarea.get().strip()
         if not tema:
-            self.notificar("Escribe primero un tema en el recuadro superior para generar los pasos.")
+            self.notificar("Escribe o dicta con el micrófono un tema para generar los pasos.")
             return
         if not self.ia:
             return
 
+        # Auto-clasificar el módulo curricular según lo que el docente escribió o dictó
+        modulo_detectado = (
+            self.ia.detectar_modulo_automatico(tema, modulo_preferido=self.combo_categoria.get())
+            if hasattr(self.ia, "detectar_modulo_automatico")
+            else self.combo_categoria.get()
+        )
+        self.combo_categoria.set(modulo_detectado)
+        self.seleccionar_modulo_curricular(modulo_detectado, cargar_primera=False)
+
         self.btn_generar_ia.configure(state="disabled", text="Generando...")
 
         def _worker():
-            pasos, pistas = self.ia.descomponer_tarea_ia(tema)
+            pasos, pistas = self.ia.descomponer_tarea_ia(tema, modulo_forzado=modulo_detectado)
 
             def _aplicar():
                 if not self.winfo_exists():
                     return
                 self.btn_generar_ia.configure(state="normal", text="Generar Pasos")
                 if not self.entry_nombre_tarea.get().strip():
-                    self.entry_nombre_tarea.insert(0, tema)
+                    self.entry_nombre_tarea.insert(0, f"{modulo_detectado} - {tema}")
                 self._pasos_borrador = [
                     {"paso": p, "pista": pistas[i] if i < len(pistas) else ""}
                     for i, p in enumerate(pasos)
                 ]
                 self._renderizar_tarjetas_pasos()
-                self.notificar(f"{len(pasos)} micro-pasos creados ({self.ia.ultima_fuente}).")
+                self.notificar(
+                    f"Módulo [{modulo_detectado}] seleccionado automáticamente • {len(pasos)} pasos ({self.ia.ultima_fuente})."
+                )
 
             self.after(0, _aplicar)
 
         threading.Thread(target=_worker, daemon=True).start()
+
+    def _accion_subir_archivo_pensum(self) -> None:
+        """Abre el selector de archivos escolares (.pdf, .docx, .txt, .md, .csv) para extraer pensum y tareas."""
+        ruta = filedialog.askopenfilename(
+            parent=self,
+            title="Seleccionar Guía Escolar o Pensum (.pdf, .docx, .txt, .md, .csv)",
+            filetypes=[
+                ("Documentos Escolares", "*.pdf *.docx *.txt *.md *.csv *.tsv"),
+                ("Archivos PDF y Word", "*.pdf *.docx"),
+                ("Texto y Listas", "*.txt *.md *.csv *.tsv"),
+                ("Todos los archivos", "*.*"),
+            ],
+        )
+        if not ruta:
+            return
+        self.procesar_archivo_pensum(ruta, abrir_modal=True)
+
+    def procesar_archivo_pensum(self, ruta_archivo: str, abrir_modal: bool = True) -> List[Dict]:
+        """
+        Lee el documento del tutor, guarda el pensum por módulo en SQLite para que Haru
+        conozca el currículo del niño, auto-clasifica cada tarea detectada (incluso en
+        documentos mixtos) y abre el modal de aprobación.
+        """
+        doc = cargar_archivo_estudio(ruta_archivo)
+        if not doc.exito:
+            if abrir_modal and self.winfo_exists():
+                messagebox.showwarning("Archivo no legible", doc.mensaje_error, parent=self)
+            return []
+
+        pref_mod = self.modulo_activo if self.modulo_activo in self.MODULOS_CURRICULARES else ""
+        tareas_propuestas = (
+            self.ia.extraer_tareas_de_documento(doc, modulo_defecto=pref_mod)
+            if (self.ia and hasattr(self.ia, "extraer_tareas_de_documento"))
+            else []
+        )
+
+        # Guardar el pensum en SQLite para cada módulo detectado en el documento
+        if self.db and hasattr(self.db, "guardar_pensum_modulo"):
+            modulos_doc = {t.get("categoria", "Matemáticas") for t in tareas_propuestas}
+            if not modulos_doc and self.ia:
+                modulos_doc = {self.ia.detectar_modulo_automatico(doc.texto_completo)}
+            for mod_d in modulos_doc:
+                self.db.guardar_pensum_modulo(mod_d, doc.nombre_archivo, doc.resumen_pensum)
+
+        # Seleccionar automáticamente en el Panel Docente el módulo principal detectado
+        if tareas_propuestas:
+            mod_principal = tareas_propuestas[0].get("categoria", "Matemáticas")
+            self.seleccionar_modulo_curricular(mod_principal, cargar_primera=False)
+
+        if abrir_modal and tareas_propuestas and self.winfo_exists():
+            ModalAprobadorTareasDocumento(
+                self,
+                nombre_archivo=doc.nombre_archivo,
+                tareas_propuestas=tareas_propuestas,
+                tema=self.tema,
+                on_aprobar_lote=self._importar_lote_tareas_documento,
+            )
+        return tareas_propuestas
+
+    def _importar_lote_tareas_documento(self, lote_aprobado: List[Dict]) -> None:
+        if not lote_aprobado or not self.db:
+            return
+        total = self.db.guardar_lote_tareas(lote_aprobado)
+        mod_primero = self.db.normalizar_modulo(lote_aprobado[0].get("categoria", "Matemáticas"))
+        self.seleccionar_modulo_curricular(mod_primero, cargar_primera=True)
+        if self.callback_recargar:
+            self.callback_recargar()
+        modulos_unicos = sorted({self.db.normalizar_modulo(x.get("categoria", "")) for x in lote_aprobado})
+        self.notificar(
+            f"¡{total} tareas agregadas automáticamente a: {', '.join(modulos_unicos)}!"
+        )
 
     def _guardar_mision(self, activar_en_haru: bool = False) -> None:
         self._sincronizar_borrador_desde_widgets()
@@ -688,11 +951,19 @@ class PanelDocente(ctk.CTkToplevel):
             messagebox.showwarning("Sin pasos", "Agrega al menos un paso concreto para el estudiante.", parent=self)
             return
 
-        categoria = self.combo_categoria.get()
-        if self.db:
-            self.db.guardar_tarea(nombre, pasos, pistas, categoria=categoria)
+        # Si el texto del título/pasos pertenece claramente a un módulo (ej. Inglés o Matemáticas),
+        # auto-seleccionar su módulo correspondiente
+        texto_conjunto = f"{nombre} {' '.join(pasos)}"
+        categoria_elegida = self.combo_categoria.get()
+        if self.ia and hasattr(self.ia, "detectar_modulo_automatico"):
+            modulo_auto = self.ia.detectar_modulo_automatico(texto_conjunto, modulo_preferido=categoria_elegida)
+            categoria_elegida = modulo_auto
+            self.combo_categoria.set(categoria_elegida)
 
-        self._poblar_lista_catalogo()
+        if self.db:
+            self.db.guardar_tarea(nombre, pasos, pistas, categoria=categoria_elegida)
+
+        self.seleccionar_modulo_curricular(categoria_elegida, cargar_primera=False)
         if self.callback_recargar:
             self.callback_recargar()
 
@@ -700,23 +971,23 @@ class PanelDocente(ctk.CTkToplevel):
             self.motor.cargar_tarea(nombre, pasos, pistas)
             if self.callback_recargar:
                 self.callback_recargar()
-            self.notificar(f"Misión «{nombre}» enviada al tablero de Haru.")
+            self.notificar(f"Misión «{nombre}» enviada al módulo [{categoria_elegida}] y activada en Haru.")
         else:
-            # Si se editó la misión que está actualmente en reposo en el tablero del niño, sincronizar sus pasos al instante
             if self.motor.tarea_actual == nombre and self.motor.estado == self.motor.ESTADO_IDLE:
                 self.motor.cargar_tarea(nombre, pasos, pistas)
                 if self.callback_recargar:
                     self.callback_recargar()
-            self.notificar(f"Misión «{nombre}» guardada correctamente.")
+            self.notificar(f"Misión «{nombre}» guardada en el módulo [{categoria_elegida}].")
 
     def _restaurar_misiones_base(self) -> None:
         if not self.db or not hasattr(self.db, "restaurar_misiones_predeterminadas"):
             return
         self.db.restaurar_misiones_predeterminadas()
+        self.modulo_activo = "Todos"
         self._poblar_lista_catalogo()
         if self.callback_recargar:
             self.callback_recargar()
-        self.notificar("Las 4 misiones escolares base fueron restauradas.")
+        self.notificar("Las 5 misiones escolares base por módulo fueron restauradas.")
 
     def _eliminar_mision_actual(self) -> None:
         nombre = self.entry_nombre_tarea.get().strip()

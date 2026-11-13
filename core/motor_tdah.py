@@ -119,6 +119,29 @@ class MotorTDAH:
         self._hilo_timer: Optional[threading.Thread] = None
         self._lock = threading.Lock()
         self._ia_ocupada = False
+        self.ultimo_pulso_actividad = time.time()
+        self.umbral_inactividad_seg = 180
+        self._nudge_emitido_en_paso = False
+
+    def registrar_actividad_estudiante(self) -> None:
+        """Actualiza el pulso de actividad para el recordatorio amable de retención de foco."""
+        self.ultimo_pulso_actividad = time.time()
+        self._nudge_emitido_en_paso = False
+
+    def disparar_nudge_retencion(self) -> str:
+        """Emite un estímulo de reconexión cálido y no punitivo tras 180s de inactividad en un paso."""
+        num_paso = self.indice_paso + 1
+        msg = (
+            f"¡Hola campeón! Seguimos juntos en el paso {num_paso}. "
+            f"Si necesitas ayuda, toca Pista de Haru o pregúntame con el micrófono."
+        )
+        self._nudge_emitido_en_paso = True
+        self.ultimo_pulso_actividad = time.time()
+        if self.bus:
+            self.bus.emitir("nudge_atencion", mensaje=msg, paso=num_paso)
+        self._hablar(msg)
+        self._notificar_ui()
+        return msg
 
     def set_modo_demo(self, activo: bool) -> None:
         self.modo_demo = activo
@@ -219,6 +242,7 @@ class MotorTDAH:
         self._reto_actual_cache = None
         self._sesion_guardada = False
         self.reloj_en_pausa_manual = False
+        self.registrar_actividad_estudiante()
         if self.db:
             self.max_descansos_por_tarea = int(self.db.obtener_preferencia("max_descansos_por_tarea", "2"))
             self.estrellas_totales = self.db.obtener_estrellas()
@@ -306,6 +330,7 @@ class MotorTDAH:
             return
 
         self.reloj_en_pausa_manual = False
+        self.registrar_actividad_estudiante()
         gano_estrella_nueva = self.indice_paso not in self.pasos_premiados
         if gano_estrella_nueva:
             self.pasos_premiados.add(self.indice_paso)
@@ -440,6 +465,7 @@ class MotorTDAH:
         return respuesta
 
     def consultar_ia_async(self, pregunta: str) -> None:
+        self.registrar_actividad_estudiante()
         if self._ia_ocupada:
             return
         self._ia_ocupada = True
@@ -456,6 +482,33 @@ class MotorTDAH:
                     self.bus.emitir("ia_respuesta", respuesta=respuesta)
 
         threading.Thread(target=_worker, daemon=True, name="HaruAIWorker").start()
+
+    def consultar_documento_async(
+        self, texto_documento: str, nombre_documento: str, pregunta: str = ""
+    ) -> None:
+        """Analiza un documento escolar en segundo plano y responde por voz e interfaz."""
+        self.registrar_actividad_estudiante()
+        if self._ia_ocupada:
+            return
+        self._ia_ocupada = True
+        if self.bus:
+            self.bus.emitir("ia_pensando", mensaje=f"Leyendo el archivo {nombre_documento}...")
+
+        def _worker():
+            respuesta = f"Revisé el archivo {nombre_documento}. ¡Hagámoslo paso a paso!"
+            try:
+                if self.ia and hasattr(self.ia, "responder_sobre_documento"):
+                    respuesta = self.ia.responder_sobre_documento(
+                        texto_documento, pregunta=pregunta, nombre_doc=nombre_documento
+                    )
+                self._hablar(respuesta)
+                self._notificar_ui()
+            finally:
+                self._ia_ocupada = False
+                if self.bus:
+                    self.bus.emitir("ia_respuesta", respuesta=respuesta)
+
+        threading.Thread(target=_worker, daemon=True, name="HaruDocWorker").start()
 
     def calcular_intervalo_promedio_descanso(self) -> int:
         if not self.marcas_segundos_descanso:
@@ -617,6 +670,12 @@ class MotorTDAH:
                     self.segundos_restantes -= 1
                     if self.estado == self.ESTADO_EN_PASO:
                         self.segundos_concentracion_sesion += 1
+                        if (
+                            not self._nudge_emitido_en_paso
+                            and (time.time() - self.ultimo_pulso_actividad) >= self.umbral_inactividad_seg
+                        ):
+                            self.disparar_nudge_retencion()
+                            continue
                     self._notificar_ui()
                 else:
                     if self.estado == self.ESTADO_EN_PASO:

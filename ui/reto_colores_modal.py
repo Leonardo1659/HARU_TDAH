@@ -14,7 +14,7 @@ import customtkinter as ctk
 from PIL import Image
 
 from core.herramientas_multimodales import OPENCV_DISPONIBLE, analizar_frame_colores
-from ui.iconos import icono_ctk
+from ui.iconos import aplicar_icono_ventana_haru, icono_ctk
 
 if OPENCV_DISPONIBLE:
     import cv2
@@ -26,6 +26,7 @@ class ModalRetoColores(ctk.CTkToplevel):
     def __init__(self, parent, tema: Dict[str, str],
                  on_premio: Optional[Callable[[str], None]] = None):
         super().__init__(parent)
+        aplicar_icono_ventana_haru(self)
         self.tema = tema
         self.on_premio = on_premio
         self.cap = None
@@ -35,8 +36,9 @@ class ModalRetoColores(ctk.CTkToplevel):
         self._completado = False
 
         self.title("Reto Sensorial de Colores — Haru")
-        self.geometry("600x540")
-        self.resizable(False, False)
+        self.geometry("640x600")
+        self.minsize(580, 540)
+        self.resizable(True, True)
         self.configure(fg_color=tema["bg_stage"])
         self.transient(parent)
 
@@ -104,15 +106,55 @@ class ModalRetoColores(ctk.CTkToplevel):
                 font=ctk.CTkFont(size=12, weight="bold"),
             ).pack(side="left", padx=5)
 
-        # Visor de video integrado
+        # Contenedor inferior fijo (empaquetado con side="bottom" para que NUNCA se corte)
+        self.fila_acciones = ctk.CTkFrame(card, fg_color="transparent")
+        self.fila_acciones.pack(side="bottom", fill="x", padx=20, pady=(4, 14))
+
+        self.btn_volver = ctk.CTkButton(
+            self.fila_acciones,
+            text="Volver a mi tarea",
+            image=icono_ctk("arrow_left", "#ffffff", 16),
+            compound="left",
+            fg_color=self.tema["btn_stage_pill"],
+            hover_color=self.tema["btn_stage_pill_hover"],
+            border_width=1,
+            border_color=self.tema["btn_stage_border"],
+            corner_radius=16,
+            width=170,
+            height=40,
+            font=ctk.CTkFont(size=13, weight="bold"),
+            command=self.cerrar,
+        )
+        self.btn_volver.pack(side="right")
+
+        self.barra = ctk.CTkProgressBar(
+            card,
+            width=440,
+            height=14,
+            corner_radius=8,
+            progress_color=self.tema["btn_green"],
+        )
+        self.barra.set(0.0)
+        self.barra.pack(side="bottom", pady=(0, 8))
+
+        # Barra de progreso de enfoque del color
+        self.lbl_estado = ctk.CTkLabel(
+            card,
+            text="Esperando un objeto de color...",
+            font=ctk.CTkFont(size=13, weight="bold"),
+            text_color=self.tema["text_primary"],
+        )
+        self.lbl_estado.pack(side="bottom", pady=(4, 4))
+
+        # Visor de video integrado (se adapta al espacio central sin empujar los botones fuera)
         self.marco_video = ctk.CTkFrame(
             card,
             width=460,
-            height=290,
+            height=265,
             fg_color="#0f172a",
             corner_radius=18,
         )
-        self.marco_video.pack(padx=20, pady=6)
+        self.marco_video.pack(fill="both", expand=True, padx=20, pady=6)
         self.marco_video.pack_propagate(False)
 
         self.lbl_video = ctk.CTkLabel(
@@ -124,42 +166,6 @@ class ModalRetoColores(ctk.CTkToplevel):
             font=ctk.CTkFont(size=14, weight="bold"),
         )
         self.lbl_video.pack(fill="both", expand=True)
-
-        # Barra de progreso de enfoque del color
-        self.lbl_estado = ctk.CTkLabel(
-            card,
-            text="Esperando un objeto de color...",
-            font=ctk.CTkFont(size=13, weight="bold"),
-            text_color=self.tema["text_primary"],
-        )
-        self.lbl_estado.pack(pady=(6, 4))
-
-        self.barra = ctk.CTkProgressBar(
-            card,
-            width=420,
-            height=14,
-            corner_radius=8,
-            progress_color=self.tema["btn_green"],
-        )
-        self.barra.set(0.0)
-        self.barra.pack(pady=(0, 10))
-
-        # Contenedor para botones inferiores o simulación sin cámara
-        self.fila_acciones = ctk.CTkFrame(card, fg_color="transparent")
-        self.fila_acciones.pack(fill="x", padx=20, pady=(2, 12))
-
-        ctk.CTkButton(
-            self.fila_acciones,
-            text="Volver a mi tarea",
-            image=icono_ctk("arrow_left", "#ffffff", 16),
-            compound="left",
-            fg_color=self.tema["btn_stage_pill"],
-            hover_color=self.tema["btn_stage_pill_hover"],
-            corner_radius=16,
-            height=38,
-            font=ctk.CTkFont(size=13, weight="bold"),
-            command=self.cerrar,
-        ).pack(side="right")
 
     def _iniciar_captura(self) -> None:
         if self._cerrado:
@@ -217,8 +223,10 @@ class ModalRetoColores(ctk.CTkToplevel):
         ok, frame_bgr = self.cap.read()
         if ok and frame_bgr is not None:
             frame_rgb, color = analizar_frame_colores(frame_bgr)
-            pil_img = Image.fromarray(frame_rgb).resize((452, 282), Image.Resampling.BILINEAR)
-            ctk_img = ctk.CTkImage(light_image=pil_img, dark_image=pil_img, size=(452, 282))
+            vw = max(360, self.marco_video.winfo_width() - 12)
+            vh = max(210, self.marco_video.winfo_height() - 12)
+            pil_img = Image.fromarray(frame_rgb).resize((vw, vh), Image.Resampling.BILINEAR)
+            ctk_img = ctk.CTkImage(light_image=pil_img, dark_image=pil_img, size=(vw, vh))
             self.lbl_video.configure(image=ctk_img, text="")
             self.lbl_video._ctk_img_ref = ctk_img  # Evitar recolección de basura
 

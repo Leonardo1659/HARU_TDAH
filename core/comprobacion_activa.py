@@ -224,6 +224,53 @@ def generar_reto_paso(
             "acepta_voz_descriptiva": False,
         }
 
+    # 2.5. Paso de vocabulario de Inglés (colores, animales o conteo bilingüe)
+    es_paso_ingles = (
+        "en ingles" in norm
+        or "ingles" in _normalizar(nombre_tarea)
+        or any(re.search(rf"\b{w}\b", norm) for w in ("blue", "red", "yellow", "green", "cat", "dog", "one, two, three", "hello"))
+    )
+    if es_paso_ingles:
+        if re.search(r"\bblue\b", norm):
+            opciones = ["BLUE", "RED", "GREEN"]
+            rng = random.Random(numero_paso + 19)
+            rng.shuffle(opciones)
+            return {
+                "tipo": "ingles",
+                "pregunta": "¡Reto de Inglés! Toca el botón o dime en voz alta cómo se dice azul en inglés:",
+                "opciones": opciones,
+                "respuesta_principal": "BLUE",
+                "respuestas_validas": {"blue", "azul"},
+                "numeros_validos": set(),
+                "acepta_voz_descriptiva": False,
+            }
+        if re.search(r"\bcat\b", norm):
+            opciones = ["CAT", "DOG", "SUN"]
+            rng = random.Random(numero_paso + 23)
+            rng.shuffle(opciones)
+            return {
+                "tipo": "ingles",
+                "pregunta": "¡Reto de Inglés! Toca el botón o dime en voz alta cómo se dice gatito en inglés:",
+                "opciones": opciones,
+                "respuesta_principal": "CAT",
+                "respuestas_validas": {"cat", "gato", "gatito", "miau"},
+                "numeros_validos": set(),
+                "acepta_voz_descriptiva": False,
+            }
+        if "one" in norm and "two" in norm and "three" in norm:
+            opciones = ["One, Two, Three", "Red, Blue, Green", "Cat, Dog, Bird"]
+            rng = random.Random(numero_paso + 29)
+            rng.shuffle(opciones)
+            return {
+                "tipo": "ingles",
+                "pregunta": "¡Reto de Inglés! Toca el botón o cuenta conmigo 1, 2 y 3 en inglés:",
+                "opciones": opciones,
+                "respuesta_principal": "One, Two, Three",
+                "respuestas_validas": {"one, two, three", "one two three", "one", "two", "three", "uno dos tres"},
+                "numeros_validos": {1, 2, 3},
+                "acepta_voz_descriptiva": False,
+            }
+
     # 3. Paso con colores específicos mencionados (ej. "azul, amarillo y verde")
     colores_en_paso = [(etq, tok) for etq, tok in _COLORES_CATALOGO if re.search(rf"\b{tok}\b", norm)]
     if colores_en_paso:

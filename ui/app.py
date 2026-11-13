@@ -26,7 +26,7 @@ from core.repositorio_db import RepositorioTDAH
 from core.voz import EscuchaVozHaru, MotorVozHaru
 from hardware.control_leds import ControladorHardwareLEDs
 from ui.avatar_sprite import REQUISITOS_SKIN, EscenarioCentralHaru
-from ui.iconos import icono_ctk, icono_skin_ctk
+from ui.iconos import aplicar_icono_ventana_haru, icono_ctk, icono_skin_ctk
 from ui.karaoke import SubtitulosKaraoke
 from ui.modales import (
     ModalAlbumPremios,
@@ -47,6 +47,7 @@ def _limpiar_texto_paso_ui(texto: str) -> str:
 class VentanaPrincipalHaru(ctk.CTk):
     def __init__(self, silenciar_audio_inicial: bool = False):
         super().__init__()
+        aplicar_icono_ventana_haru(self)
 
         # Inicializar servicios centrales desacoplados
         self.bus = BusEventosUI()
@@ -215,18 +216,33 @@ class VentanaPrincipalHaru(ctk.CTk):
 
         self.lbl_icono_mision_top = ctk.CTkLabel(
             self.card_mision_top,
-            text=" Misión:",
-            image=icono_ctk("clipboard", self.tema["text_primary"], 16),
+            text=" Módulo:",
+            image=icono_ctk("folder", self.tema["text_primary"], 16),
             compound="left",
-            font=ctk.CTkFont(size=13, weight="bold"),
+            font=ctk.CTkFont(size=12, weight="bold"),
             text_color=self.tema["text_primary"],
         )
-        self.lbl_icono_mision_top.pack(side="left", padx=(12, 4), pady=8)
+        self.lbl_icono_mision_top.pack(side="left", padx=(10, 4), pady=8)
+
+        self.modulo_filtro_activo = "Todos"
+        self._mapa_modulo_etiqueta: Dict[str, str] = {"Todos los Módulos": "Todos"}
+        self.combo_modulo = ctk.CTkOptionMenu(
+            self.card_mision_top,
+            values=["Todos los Módulos"],
+            width=155,
+            height=32,
+            corner_radius=12,
+            fg_color=self.tema["btn_purple"],
+            button_color=self.tema["btn_purple_hover"],
+            font=ctk.CTkFont(size=12, weight="bold"),
+            command=self._al_elegir_modulo_combo,
+        )
+        self.combo_modulo.pack(side="left", padx=(0, 4), pady=8)
 
         self.combo_mision = ctk.CTkOptionMenu(
             self.card_mision_top,
             values=["Matemáticas - Sumas Divertidas"],
-            width=235,
+            width=215,
             height=32,
             corner_radius=12,
             fg_color=self.tema["btn_stage_pill"],
@@ -827,18 +843,31 @@ class VentanaPrincipalHaru(ctk.CTk):
         self.bind("<KeyPress-r>", _al_repetir)
         self.bind("<KeyPress-R>", _al_repetir)
         self.bind("<Escape>", lambda _e: self.voz.detener())
-        self.card_pista.bind(
-            "<Configure>",
-            lambda e: self.lbl_pista.configure(wraplength=max(260, e.width - 36)),
-        )
-        self.card_paso.bind(
-            "<Configure>",
-            lambda e: self.lbl_texto_paso.configure(wraplength=max(220, e.width - 34)),
-        )
+        self._ultimo_wrap_pista = 0
+        self._ultimo_wrap_paso = 0
+
+        def _ajustar_wrap_pista(e):
+            nuevo = int(round(max(260, e.width - 36) / 24.0) * 24)
+            if abs(nuevo - self._ultimo_wrap_pista) >= 24:
+                self._ultimo_wrap_pista = nuevo
+                self.lbl_pista.configure(wraplength=nuevo)
+
+        def _ajustar_wrap_paso(e):
+            nuevo = int(round(max(220, e.width - 34) / 24.0) * 24)
+            if abs(nuevo - self._ultimo_wrap_paso) >= 24:
+                self._ultimo_wrap_paso = nuevo
+                self.lbl_texto_paso.configure(wraplength=nuevo)
+
+        self.card_pista.bind("<Configure>", _ajustar_wrap_pista)
+        self.card_paso.bind("<Configure>", _ajustar_wrap_paso)
 
     def _refrescar_botones_skin(self) -> None:
         estrellas = self.motor.estrellas_totales
         activa = self.escenario_haru.skin
+        firma_skin = (estrellas, activa, id(self.tema))
+        if getattr(self, "_ultima_firma_skin", None) == firma_skin:
+            return
+        self._ultima_firma_skin = firma_skin
         for k, btn in self._botones_skin.items():
             req, _icono, _nom = REQUISITOS_SKIN.get(k, (0, "01", "Haru"))
             desbl = estrellas >= req
@@ -976,8 +1005,50 @@ class VentanaPrincipalHaru(ctk.CTk):
     def _etiqueta_combo_mision(nombre: str) -> str:
         return nombre if len(nombre) <= 34 else (nombre[:32].rstrip() + "…")
 
+    def _refrescar_combo_modulos(self) -> None:
+        if not hasattr(self, "combo_modulo"):
+            return
+        progreso = (
+            self.db.obtener_progreso_modulos()
+            if hasattr(self.db, "obtener_progreso_modulos")
+            else {}
+        )
+        self._mapa_modulo_etiqueta = {"Todos los Módulos": "Todos"}
+        etiquetas_mod = ["Todos los Módulos"]
+        for mod in getattr(self.db, "MODULOS_CURRICULARES", ("Matemáticas", "Lenguaje", "Ciencias", "Inglés", "Hábitos y Orden")):
+            hechas, total = progreso.get(mod, (0, 0))
+            etq = f"{mod} ({hechas}/{total})"
+            self._mapa_modulo_etiqueta[etq] = mod
+            etiquetas_mod.append(etq)
+
+        self.combo_modulo.configure(values=etiquetas_mod)
+        etq_sel = next(
+            (k for k, v in self._mapa_modulo_etiqueta.items() if v == getattr(self, "modulo_filtro_activo", "Todos")),
+            "Todos los Módulos",
+        )
+        self.combo_modulo.set(etq_sel)
+
+    def seleccionar_modulo(self, nombre_modulo: str, iniciar_primera: bool = True) -> None:
+        """Permite entrar directamente a las tareas de un Módulo Curricular específico."""
+        if nombre_modulo != "Todos" and hasattr(self.db, "normalizar_modulo"):
+            nombre_modulo = self.db.normalizar_modulo(nombre_modulo)
+        self.modulo_filtro_activo = nombre_modulo
+        self._cargar_catalogo_misiones(seleccionar_primera=iniciar_primera)
+
+    def _al_elegir_modulo_combo(self, etiqueta_mod: str) -> None:
+        mod_real = getattr(self, "_mapa_modulo_etiqueta", {}).get(etiqueta_mod, "Todos")
+        self.seleccionar_modulo(mod_real, iniciar_primera=True)
+
     def _cargar_catalogo_misiones(self, seleccionar_primera: bool = False) -> None:
-        tareas = self.db.listar_tareas()
+        self._refrescar_combo_modulos()
+        modulo_actual = getattr(self, "modulo_filtro_activo", "Todos")
+        if modulo_actual != "Todos" and hasattr(self.db, "listar_tareas_por_modulo"):
+            tareas = self.db.listar_tareas_por_modulo(modulo_actual)
+            if not tareas:
+                tareas = self.db.listar_tareas()
+        else:
+            tareas = self.db.listar_tareas()
+
         self._mapa_tareas = {t["nombre"]: t for t in tareas}
         self._mapa_combo_etiqueta = {}
         etiquetas = []
@@ -1057,8 +1128,10 @@ class VentanaPrincipalHaru(ctk.CTk):
         self.card_mision_top.configure(fg_color=t["card_bg"], border_color=t["card_border"])
         self.lbl_icono_mision_top.configure(
             text_color=t["text_primary"],
-            image=icono_ctk("clipboard", t["text_primary"], 16),
+            image=icono_ctk("folder", t["text_primary"], 16),
         )
+        if hasattr(self, "combo_modulo"):
+            self.combo_modulo.configure(fg_color=t["btn_purple"], button_color=t["btn_purple_hover"])
         self.combo_mision.configure(fg_color=t["btn_stage_pill"], button_color=t["btn_stage_pill_hover"])
         self.btn_puntos_medalla.configure(
             fg_color=t["badge_gold_bg"],
@@ -1146,6 +1219,13 @@ class VentanaPrincipalHaru(ctk.CTk):
                 self.escenario_haru.disparar_reaccion(
                     d.get("reaccion", EscenarioCentralHaru.ESTADO_SALUDANDO),
                     float(d.get("duracion", 2.2)),
+                )
+
+            elif tipo == "nudge_atencion":
+                self.escenario_haru.disparar_reaccion(EscenarioCentralHaru.ESTADO_SALUDANDO, 3.0)
+                self.lbl_pista.configure(
+                    text=f"  {d.get('mensaje', '')}",
+                    image=icono_ctk("sparkles", self.tema["btn_purple"], 16),
                 )
 
             elif tipo == "logro_desbloqueado":
@@ -1300,7 +1380,31 @@ class VentanaPrincipalHaru(ctk.CTk):
         estado = snap["estado"]
         min_r = snap["minutos"]
         seg_r = snap["segundos"]
-        self.lbl_reloj.configure(text=f"{min_r:02d}:{seg_r:02d}")
+        txt_reloj = f"{min_r:02d}:{seg_r:02d}"
+        if getattr(self, "_ultimo_txt_reloj", None) != txt_reloj:
+            self._ultimo_txt_reloj = txt_reloj
+            self.lbl_reloj.configure(text=txt_reloj)
+
+        txt_pista_actual = self.lbl_pista.cget("text").strip()
+        es_pista_ia = txt_pista_actual.startswith(("Haru IA:", "Premio:"))
+        firma_estructural = (
+            estado,
+            snap["tarea"],
+            snap["paso_actual"],
+            snap["total_pasos"],
+            snap["texto_paso"],
+            snap["pista_paso"],
+            snap["estrellas_totales"],
+            snap["estrellas_sesion"],
+            snap["descansos_disponibles"],
+            snap["reloj_pausado"],
+            bool(snap.get("paso_ya_premiado")),
+            es_pista_ia,
+            id(self.tema),
+        )
+        if getattr(self, "_ultima_firma_snapshot", None) == firma_estructural:
+            return
+        self._ultima_firma_snapshot = firma_estructural
 
         if snap["reloj_pausado"] or estado == MotorTDAH.ESTADO_PAUSA_ACTIVA:
             self.lbl_dot_reloj.configure(text_color="#f59e0b")
