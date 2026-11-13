@@ -134,7 +134,7 @@ HARU_TDAH/
 │   ├── config.py                 # Gestión de rutas (código fuente y PyInstaller _MEIPASS)
 │   ├── eventos.py                # Bus asíncrono y reactivo de eventos de UI
 │   ├── motor_tdah.py             # Máquina de estados pedagógica, Pomodoro y retención de foco
-│   ├── repositorio_db.py         # Persistencia SQLite WAL, 5 módulos, pensum y reportes
+│   ├── repositorio_db.py         # Base Relacional SQLite WAL en 3FN (FKs, pasos_tarea y auditoria_eventos)
 │   ├── herramientas_multimodales.py # Síntesis de tonos y visión computacional
 │   ├── ia/                       # Clasificador automático de módulos, AST, Ollama y Gemini REST
 │   └── voz/                      # Síntesis TTS fonética y reconocimiento de voz STT
