@@ -1,15 +1,19 @@
 """
-Repositorio de Base de Datos SQLite (Persistencia Local, Analítica y Seguridad)
+Repositorio Relacional Normalizado (3FN) en SQLite con Integridad Referencial y Auditoría
 Universidad Salesiana de Bolivia - Proyecto Integrador Asistente TDAH "Haru"
 
-Cumple con:
-- Ley N.º 548 (Código Niña, Niño y Adolescente): Minimización de datos,
-  sin almacenamiento de grabaciones de voz ni datos biométricos/personales,
-  y sin almacenar llaves API en la base de datos.
-- Ley N.º 070 y R.M. N.º 0069/2025: Seguimiento psicopedagógico de tareas,
-  registro de frecuencia de descansos del estudiante y articulación con docentes.
-- Seguridad: PIN docente protegido con PBKDF2-HMAC-SHA256 + sal aleatoria y
-  bloqueo temporal persistente ante intentos fallidos.
+Arquitectura Relacional Normalizada (1FN / 2FN / 3FN con `PRAGMA foreign_keys = ON`):
+- `modulos`: Catálogo maestro de los 5 Módulos Curriculares oficiales.
+- `tareas`: Misiones escolares vinculadas a `modulos(id)` mediante `modulo_id` (FK).
+- `pasos_tarea`: Micro-pasos y pistas atómicas normalizadas (1FN) vinculadas a `tareas(id)` con `ON DELETE CASCADE`.
+- `pensum_modulos`: Guías/pensum curriculares vinculados a `modulos(id)` mediante `modulo_id` (FK).
+- `sesiones_estudio`: Historial de sesiones vinculado a `tareas(id)` y `modulos(id)` (`ON DELETE SET NULL` para preservar trazabilidad histórica).
+- `bitacora_descansos`: Registro de descansos vinculado a `tareas(id)` y `modulos(id)` (`ON DELETE SET NULL`).
+- `recompensas_catalogo`: Catálogo de premios reales pactados.
+- `historial_canjes`: Canjes vinculados a `recompensas_catalogo(id)` mediante `recompensa_id` (`ON DELETE SET NULL`).
+- `conocimiento_escolar`: Respuestas curriculares vinculadas a `modulos(id)` mediante `modulo_id` (FK).
+- `auditoria_eventos`: Bitácora relacional de eventos críticos de seguridad, pedagogía y configuración.
+- `perfil_progreso`: Estado de perfil local y hash criptográfico PBKDF2-HMAC-SHA256 del PIN docente.
 """
 
 import csv
@@ -57,7 +61,7 @@ def _formatear_duracion_humana(segundos: int) -> str:
 
 
 class RepositorioTDAH:
-    SCHEMA_VERSION = "2"
+    SCHEMA_VERSION = "3"
     PBKDF2_ITERATIONS = 120_000
     MAX_INTENTOS_PIN = 3
     SEGUNDOS_BLOQUEO_PIN = 45
@@ -68,6 +72,13 @@ class RepositorioTDAH:
         "Inglés",
         "Hábitos y Orden",
     )
+    DESCRIPCIONES_MODULOS = {
+        "Matemáticas": "Razonamiento lógico, cálculo aritmético y resolución guiada de problemas.",
+        "Lenguaje": "Comprensión lectora, expresión oral/escrita y vocabulario estructurado.",
+        "Ciencias": "Exploración de la naturaleza, el cuerpo humano y el entorno boliviano.",
+        "Inglés": "Vocabulario bilingüe interactivo por asociación auditiva y visual.",
+        "Hábitos y Orden": "Funciones ejecutivas, organización de útiles y rutinas de autonomía.",
+    }
     RECOMPENSAS_SUGERIDAS = [
         ("5 min de dibujo o plastilina libre", 6, "Recompensa rápida alcanzable tras tu primera misión completada."),
         ("Escuchar mi canción favorita", 10, "Elegir una canción alegre en casa o en el aula."),
@@ -95,30 +106,102 @@ class RepositorioTDAH:
         try:
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA synchronous=NORMAL")
+            conn.execute("PRAGMA foreign_keys=ON")
             yield conn
         finally:
             conn.close()
 
+    def _obtener_o_crear_modulo_id(self, cursor: sqlite3.Cursor, categoria: str) -> int:
+        mod_norm = self.normalizar_modulo(categoria)
+        cursor.execute("SELECT id FROM modulos WHERE nombre = ?", (mod_norm,))
+        fila = cursor.fetchone()
+        if fila:
+            return int(fila["id"])
+        orden = (
+            self.MODULOS_CURRICULARES.index(mod_norm) + 1
+            if mod_norm in self.MODULOS_CURRICULARES
+            else 99
+        )
+        desc = self.DESCRIPCIONES_MODULOS.get(mod_norm, "Módulo curricular escolar.")
+        cursor.execute(
+            "INSERT INTO modulos (nombre, descripcion, orden) VALUES (?, ?, ?)",
+            (mod_norm, desc, orden),
+        )
+        return int(cursor.lastrowid)
+
+    def _sincronizar_pasos_normalizados(
+        self, cursor: sqlite3.Cursor, tarea_id: int, pasos: List[str], pistas: List[str]
+    ) -> None:
+        """Sincroniza la tabla relacional 1FN `pasos_tarea` para la tarea indicada."""
+        cursor.execute("DELETE FROM pasos_tarea WHERE tarea_id = ?", (int(tarea_id),))
+        for idx, texto_paso in enumerate(pasos, start=1):
+            pista = (
+                pistas[idx - 1]
+                if idx - 1 < len(pistas) and pistas[idx - 1]
+                else f"Haz solo el paso {idx} con calma."
+            )
+            cursor.execute(
+                """
+                INSERT INTO pasos_tarea (tarea_id, numero_paso, instruccion, pista_apoyo)
+                VALUES (?, ?, ?, ?)
+                """,
+                (int(tarea_id), idx, str(texto_paso).strip(), str(pista).strip()),
+            )
+
     def _inicializar_tablas(self):
         with self._conectar() as conn:
             cursor = conn.cursor()
-            # 1. Tabla de tareas secuenciales configurables por el docente/familia
+
+            # 1. Tabla Maestra de Módulos Curriculares (Entidad Fuerte)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS modulos (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    nombre TEXT UNIQUE NOT NULL,
+                    descripcion TEXT NOT NULL DEFAULT '',
+                    orden INTEGER NOT NULL DEFAULT 1
+                )
+            """)
+            for idx, mod_nom in enumerate(self.MODULOS_CURRICULARES, start=1):
+                cursor.execute(
+                    """
+                    INSERT OR IGNORE INTO modulos (nombre, descripcion, orden)
+                    VALUES (?, ?, ?)
+                    """,
+                    (mod_nom, self.DESCRIPCIONES_MODULOS.get(mod_nom, ""), idx),
+                )
+
+            # 2. Tabla de Tareas Escolares (con FK a modulos)
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS tareas (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    modulo_id INTEGER REFERENCES modulos(id) ON UPDATE CASCADE ON DELETE RESTRICT,
                     nombre TEXT UNIQUE NOT NULL,
-                    categoria TEXT NOT NULL DEFAULT 'General',
-                    pasos_json TEXT NOT NULL,
-                    pistas_json TEXT NOT NULL,
+                    categoria TEXT NOT NULL DEFAULT 'Matemáticas',
+                    pasos_json TEXT NOT NULL DEFAULT '[]',
+                    pistas_json TEXT NOT NULL DEFAULT '[]',
                     es_predeterminada INTEGER NOT NULL DEFAULT 0,
                     fecha_creacion TEXT NOT NULL
                 )
             """)
 
-            # 2. Tabla de historial de sesiones (con métricas de descansos manuales e intervalo promedio)
+            # 3. Tabla Normalizada 1FN/3FN de Micro-Pasos y Pistas por Tarea (con FK a tareas)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS pasos_tarea (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    tarea_id INTEGER NOT NULL REFERENCES tareas(id) ON UPDATE CASCADE ON DELETE CASCADE,
+                    numero_paso INTEGER NOT NULL,
+                    instruccion TEXT NOT NULL,
+                    pista_apoyo TEXT NOT NULL,
+                    UNIQUE(tarea_id, numero_paso)
+                )
+            """)
+
+            # 4. Tabla de Historial de Sesiones Guiadas (con FKs a tareas y modulos)
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS sesiones_estudio (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    tarea_id INTEGER REFERENCES tareas(id) ON UPDATE CASCADE ON DELETE SET NULL,
+                    modulo_id INTEGER REFERENCES modulos(id) ON UPDATE CASCADE ON DELETE SET NULL,
                     fecha_hora TEXT NOT NULL,
                     nombre_tarea TEXT NOT NULL,
                     pasos_completados INTEGER NOT NULL,
@@ -133,17 +216,12 @@ class RepositorioTDAH:
                 )
             """)
 
-            cursor.execute("PRAGMA table_info(sesiones_estudio)")
-            columnas_actuales = [col["name"] for col in cursor.fetchall()]
-            if "pausas_manuales" not in columnas_actuales:
-                cursor.execute("ALTER TABLE sesiones_estudio ADD COLUMN pausas_manuales INTEGER NOT NULL DEFAULT 0")
-            if "intervalo_promedio_descanso_seg" not in columnas_actuales:
-                cursor.execute("ALTER TABLE sesiones_estudio ADD COLUMN intervalo_promedio_descanso_seg INTEGER NOT NULL DEFAULT 0")
-
-            # 3. Bitácora detallada de descansos del estudiante
+            # 5. Bitácora Detallada de Descansos del Estudiante (con FKs a tareas y modulos)
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS bitacora_descansos (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    tarea_id INTEGER REFERENCES tareas(id) ON UPDATE CASCADE ON DELETE SET NULL,
+                    modulo_id INTEGER REFERENCES modulos(id) ON UPDATE CASCADE ON DELETE SET NULL,
                     fecha_hora TEXT NOT NULL,
                     nombre_tarea TEXT NOT NULL,
                     paso_actual INTEGER NOT NULL,
@@ -152,7 +230,7 @@ class RepositorioTDAH:
                 )
             """)
 
-            # 4. Perfil de gamificación, seguridad PIN (hash) y preferencias
+            # 6. Perfil de Gamificación, Seguridad PIN (PBKDF2) y Preferencias
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS perfil_progreso (
                     clave TEXT PRIMARY KEY,
@@ -160,17 +238,18 @@ class RepositorioTDAH:
                 )
             """)
 
-            # 5. Base de conocimiento educativo verificado para primaria
+            # 7. Base de Conocimiento Educativo Verificado (con FK a modulos)
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS conocimiento_escolar (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    modulo_id INTEGER REFERENCES modulos(id) ON UPDATE CASCADE ON DELETE SET NULL,
                     palabra_clave TEXT UNIQUE NOT NULL,
                     materia TEXT NOT NULL,
                     respuesta_amigable TEXT NOT NULL
                 )
             """)
 
-            # 6. Catálogo de premios reales pactados (Economía de Fichas TDAH)
+            # 8. Catálogo de Premios Reales Pactados (Economía de Fichas TDAH)
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS recompensas_catalogo (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -180,26 +259,179 @@ class RepositorioTDAH:
                 )
             """)
 
-            # 7. Historial de canjes de estrellas por premios reales
+            # 9. Historial de Canjes de Puntos por Premios (con FK a recompensas_catalogo)
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS historial_canjes (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    recompensa_id INTEGER REFERENCES recompensas_catalogo(id) ON UPDATE CASCADE ON DELETE SET NULL,
                     fecha_hora TEXT NOT NULL,
                     titulo_premio TEXT NOT NULL,
                     costo_estrellas INTEGER NOT NULL
                 )
             """)
 
-            # 8. Contexto curricular / Pensum escolar por módulo cargado desde documentos del tutor
+            # 10. Pensum / Guías Escolares por Módulo (con FK a modulos)
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS pensum_modulos (
                     categoria TEXT PRIMARY KEY,
+                    modulo_id INTEGER REFERENCES modulos(id) ON UPDATE CASCADE ON DELETE CASCADE,
                     nombre_archivo TEXT NOT NULL,
                     contenido_resumen TEXT NOT NULL,
                     fecha_actualizacion TEXT NOT NULL
                 )
             """)
+
+            # 11. Bitácora Relacional de Auditoría y Seguridad del Sistema
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS auditoria_eventos (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    fecha_hora TEXT NOT NULL,
+                    tipo_evento TEXT NOT NULL,
+                    entidad TEXT NOT NULL DEFAULT 'SISTEMA',
+                    referencia_id INTEGER,
+                    detalle TEXT NOT NULL
+                )
+            """)
+
+            self._migrar_esquema_relacional_3fn(cursor)
             conn.commit()
+
+    def _migrar_esquema_relacional_3fn(self, cursor: sqlite3.Cursor) -> None:
+        """
+        Actualiza de forma transparente bases de datos previas agregando las llaves
+        foráneas (`modulo_id`, `tarea_id`, `recompensa_id`) y poblando `pasos_tarea`.
+        """
+        def _cols(tabla: str) -> List[str]:
+            cursor.execute(f"PRAGMA table_info({tabla})")
+            return [r["name"] for r in cursor.fetchall()]
+
+        cols_tareas = _cols("tareas")
+        if "modulo_id" not in cols_tareas:
+            cursor.execute(
+                "ALTER TABLE tareas ADD COLUMN modulo_id INTEGER REFERENCES modulos(id) ON UPDATE CASCADE ON DELETE RESTRICT"
+            )
+
+        cols_sesiones = _cols("sesiones_estudio")
+        if "pausas_manuales" not in cols_sesiones:
+            cursor.execute("ALTER TABLE sesiones_estudio ADD COLUMN pausas_manuales INTEGER NOT NULL DEFAULT 0")
+        if "intervalo_promedio_descanso_seg" not in cols_sesiones:
+            cursor.execute("ALTER TABLE sesiones_estudio ADD COLUMN intervalo_promedio_descanso_seg INTEGER NOT NULL DEFAULT 0")
+        if "tarea_id" not in cols_sesiones:
+            cursor.execute(
+                "ALTER TABLE sesiones_estudio ADD COLUMN tarea_id INTEGER REFERENCES tareas(id) ON UPDATE CASCADE ON DELETE SET NULL"
+            )
+        if "modulo_id" not in cols_sesiones:
+            cursor.execute(
+                "ALTER TABLE sesiones_estudio ADD COLUMN modulo_id INTEGER REFERENCES modulos(id) ON UPDATE CASCADE ON DELETE SET NULL"
+            )
+
+        cols_descansos = _cols("bitacora_descansos")
+        if "tarea_id" not in cols_descansos:
+            cursor.execute(
+                "ALTER TABLE bitacora_descansos ADD COLUMN tarea_id INTEGER REFERENCES tareas(id) ON UPDATE CASCADE ON DELETE SET NULL"
+            )
+        if "modulo_id" not in cols_descansos:
+            cursor.execute(
+                "ALTER TABLE bitacora_descansos ADD COLUMN modulo_id INTEGER REFERENCES modulos(id) ON UPDATE CASCADE ON DELETE SET NULL"
+            )
+
+        cols_canjes = _cols("historial_canjes")
+        if "recompensa_id" not in cols_canjes:
+            cursor.execute(
+                "ALTER TABLE historial_canjes ADD COLUMN recompensa_id INTEGER REFERENCES recompensas_catalogo(id) ON UPDATE CASCADE ON DELETE SET NULL"
+            )
+
+        cols_conoc = _cols("conocimiento_escolar")
+        if "modulo_id" not in cols_conoc:
+            cursor.execute(
+                "ALTER TABLE conocimiento_escolar ADD COLUMN modulo_id INTEGER REFERENCES modulos(id) ON UPDATE CASCADE ON DELETE SET NULL"
+            )
+
+        cols_pensum = _cols("pensum_modulos")
+        if "modulo_id" not in cols_pensum:
+            cursor.execute(
+                "ALTER TABLE pensum_modulos ADD COLUMN modulo_id INTEGER REFERENCES modulos(id) ON UPDATE CASCADE ON DELETE CASCADE"
+            )
+
+        # Poblar modulo_id y pasos_tarea para tareas existentes
+        cursor.execute("SELECT id, categoria, pasos_json, pistas_json, modulo_id FROM tareas")
+        for t in cursor.fetchall():
+            mod_id = self._obtener_o_crear_modulo_id(cursor, t["categoria"])
+            if t["modulo_id"] != mod_id:
+                cursor.execute(
+                    "UPDATE tareas SET modulo_id = ?, categoria = ? WHERE id = ?",
+                    (mod_id, self.normalizar_modulo(t["categoria"]), t["id"]),
+                )
+            cursor.execute("SELECT COUNT(*) as c FROM pasos_tarea WHERE tarea_id = ?", (t["id"],))
+            if cursor.fetchone()["c"] == 0:
+                try:
+                    pasos = json.loads(t["pasos_json"] or "[]")
+                    pistas = json.loads(t["pistas_json"] or "[]")
+                    if pasos:
+                        self._sincronizar_pasos_normalizados(cursor, int(t["id"]), pasos, pistas)
+                except Exception:
+                    pass
+
+        # Enlazar registros históricos existentes con sus FKs correspondientes
+        cursor.execute("""
+            UPDATE sesiones_estudio
+            SET tarea_id = (SELECT id FROM tareas WHERE LOWER(tareas.nombre) = LOWER(sesiones_estudio.nombre_tarea)),
+                modulo_id = (SELECT modulo_id FROM tareas WHERE LOWER(tareas.nombre) = LOWER(sesiones_estudio.nombre_tarea))
+            WHERE tarea_id IS NULL
+        """)
+        cursor.execute("""
+            UPDATE bitacora_descansos
+            SET tarea_id = (SELECT id FROM tareas WHERE LOWER(tareas.nombre) = LOWER(bitacora_descansos.nombre_tarea)),
+                modulo_id = (SELECT modulo_id FROM tareas WHERE LOWER(tareas.nombre) = LOWER(bitacora_descansos.nombre_tarea))
+            WHERE tarea_id IS NULL
+        """)
+        cursor.execute("""
+            UPDATE historial_canjes
+            SET recompensa_id = (SELECT id FROM recompensas_catalogo WHERE LOWER(recompensas_catalogo.titulo) = LOWER(historial_canjes.titulo_premio))
+            WHERE recompensa_id IS NULL
+        """)
+        cursor.execute("SELECT categoria FROM pensum_modulos WHERE modulo_id IS NULL")
+        for row_p in cursor.fetchall():
+            mid = self._obtener_o_crear_modulo_id(cursor, row_p["categoria"])
+            cursor.execute("UPDATE pensum_modulos SET modulo_id = ? WHERE categoria = ?", (mid, row_p["categoria"]))
+
+    def registrar_evento_auditoria(
+        self,
+        tipo_evento: str,
+        entidad: str,
+        detalle: str,
+        referencia_id: Optional[int] = None,
+    ) -> None:
+        """Registra un evento trazable en la tabla relacional `auditoria_eventos`."""
+        ahora = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        try:
+            with self._conectar() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO auditoria_eventos (fecha_hora, tipo_evento, entidad, referencia_id, detalle)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (
+                        ahora,
+                        (tipo_evento or "EVENTO").strip()[:50],
+                        (entidad or "SISTEMA").strip()[:50],
+                        int(referencia_id) if referencia_id is not None else None,
+                        (detalle or "").strip()[:300],
+                    ),
+                )
+                conn.commit()
+        except Exception:
+            pass
+
+    def obtener_auditoria_eventos(self, limite: int = 50) -> List[Dict]:
+        """Devuelve los eventos recientes de auditoría del sistema."""
+        with self._conectar() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT * FROM auditoria_eventos ORDER BY id DESC LIMIT ?",
+                (max(1, int(limite)),),
+            )
+            return [dict(r) for r in cursor.fetchall()]
 
     TAREAS_BASE = [
         {
@@ -278,6 +510,30 @@ class RepositorioTDAH:
         },
     ]
 
+    def _insertar_tarea_base_con_pasos(self, cursor: sqlite3.Cursor, t: Dict, ahora: str) -> None:
+        mod_norm = self.normalizar_modulo(t["categoria"])
+        mod_id = self._obtener_o_crear_modulo_id(cursor, mod_norm)
+        cursor.execute(
+            """
+            INSERT OR IGNORE INTO tareas (modulo_id, nombre, categoria, pasos_json, pistas_json, es_predeterminada, fecha_creacion)
+            VALUES (?, ?, ?, ?, ?, 1, ?)
+            """,
+            (
+                mod_id,
+                t["nombre"],
+                mod_norm,
+                json.dumps(t["pasos"], ensure_ascii=False),
+                json.dumps(t["pistas"], ensure_ascii=False),
+                ahora,
+            ),
+        )
+        cursor.execute("SELECT id FROM tareas WHERE nombre = ?", (t["nombre"],))
+        row_t = cursor.fetchone()
+        if row_t:
+            cursor.execute("SELECT COUNT(*) as c FROM pasos_tarea WHERE tarea_id = ?", (row_t["id"],))
+            if cursor.fetchone()["c"] == 0:
+                self._sincronizar_pasos_normalizados(cursor, int(row_t["id"]), t["pasos"], t["pistas"])
+
     def _sembrar_datos_iniciales(self):
         tareas_base = self.TAREAS_BASE
 
@@ -297,19 +553,19 @@ class RepositorioTDAH:
             ("fraccion", "Matemáticas", "Una fracción es dividir algo entero en partes iguales, como cuando partes una pizza en 4 pedazos iguales y tomas 1 cuarto."),
             ("fracción", "Matemáticas", "Una fracción es dividir algo entero en partes iguales, como cuando partes una pizza en 4 pedazos iguales y tomas 1 cuarto."),
             ("dividir", "Matemáticas", "Dividir es repartir en partes iguales. Por ejemplo, si tienes 10 caramelos para 2 amigos, a cada uno le tocan 5."),
-            ("bolivia", "Estudios Sociales", "Bolivia está en el corazón de Sudamérica, tiene 9 departamentos, su capital constitucional es Sucre y su sede de gobierno es La Paz."),
-            ("cansado", "Apoyo Emocional", "¡Es normal sentirse cansado! Presiona el botón Respirar para inhalar como oliendo una flor y soplar como una velita."),
-            ("dificil", "Apoyo Emocional", "¡No te preocupes! Cuando algo parece difícil, lo partimos en pedacitos pequeños. Hagamos solo este paso juntos."),
-            ("difícil", "Apoyo Emocional", "¡No te preocupes! Cuando algo parece difícil, lo partimos en pedacitos pequeños. Hagamos solo este paso juntos."),
+            ("bolivia", "Ciencias", "Bolivia está en el corazón de Sudamérica, tiene 9 departamentos, su capital constitucional es Sucre y su sede de gobierno es La Paz."),
+            ("cansado", "Hábitos y Orden", "¡Es normal sentirse cansado! Presiona el botón Respirar para inhalar como oliendo una flor y soplar como una velita."),
+            ("dificil", "Hábitos y Orden", "¡No te preocupes! Cuando algo parece difícil, lo partimos en pedacitos pequeños. Hagamos solo este paso juntos."),
+            ("difícil", "Hábitos y Orden", "¡No te preocupes! Cuando algo parece difícil, lo partimos en pedacitos pequeños. Hagamos solo este paso juntos."),
             ("como estas", "Conversación", "¡Estoy súper feliz y orgulloso de acompañarte hoy! ¿Y tú cómo te sientes después de avanzar en tus actividades?"),
             ("cómo estás", "Conversación", "¡Estoy súper feliz y orgulloso de acompañarte hoy! ¿Y tú cómo te sientes después de avanzar en tus actividades?"),
             ("que haces", "Conversación", "Aquí descansando tranquilo contigo en mi modo compañero. ¡Podemos charlar de tus tareas, curiosidades o contar una adivinanza!"),
             ("qué haces", "Conversación", "Aquí descansando tranquilo contigo en mi modo compañero. ¡Podemos charlar de tus tareas, curiosidades o contar una adivinanza!"),
             ("gracias", "Conversación", "¡De nada, campeón! Aprender contigo es mi parte favorita del día."),
             ("aburrido", "Conversación", "¡Podemos hacer algo divertido! Prueba el Reto de Colores con cámara, pídeme un chiste o pregúntame sobre dinosaurios o planetas."),
-            ("feliz", "Apoyo Emocional", "¡Qué alegría escuchar eso! Cuando celebramos nuestros logros con calma, nuestro cerebro aprende cada día mejor."),
-            ("adivinanza", "Motivación", "¡Adivina adivinador! Blanca por dentro, verde por fuera; si quieres que te lo diga, es-pera. ¡La pera!"),
-            ("cuento", "Motivación", "Había una vez una pequeña estrellita andina que brillaba poquito, pero dando un pasito cada noche iluminó todo el cielo de Bolivia."),
+            ("feliz", "Hábitos y Orden", "¡Qué alegría escuchar eso! Cuando celebramos nuestros logros con calma, nuestro cerebro aprende cada día mejor."),
+            ("adivinanza", "Lenguaje", "¡Adivina adivinador! Blanca por dentro, verde por fuera; si quieres que te lo diga, es-pera. ¡La pera!"),
+            ("cuento", "Lenguaje", "Había una vez una pequeña estrellita andina que brillaba poquito, pero dando un pasito cada noche iluminó todo el cielo de Bolivia."),
             ("dinosaurio", "Ciencias", "Los dinosaurios vivieron hace millones de años; algunos como el Triceratops comían plantas y en Sucre, Bolivia, ¡hay miles de sus huellas en Cal Orck'o!"),
             ("dinosaurios", "Ciencias", "Los dinosaurios vivieron hace millones de años; algunos como el Triceratops comían plantas y en Sucre, Bolivia, ¡hay miles de sus huellas en Cal Orck'o!"),
             ("ingles", "Inglés", "¡En inglés podemos jugar con colores y animales! Por ejemplo: azul es BLUE, rojo es RED, gato es CAT, perro es DOG y contamos One, Two, Three."),
@@ -324,20 +580,11 @@ class RepositorioTDAH:
             cursor.execute("SELECT COUNT(*) as total FROM tareas")
             if cursor.fetchone()["total"] == 0:
                 for t in tareas_base:
-                    cursor.execute("""
-                        INSERT INTO tareas (nombre, categoria, pasos_json, pistas_json, es_predeterminada, fecha_creacion)
-                        VALUES (?, ?, ?, ?, 1, ?)
-                    """, (t["nombre"], t["categoria"], json.dumps(t["pasos"], ensure_ascii=False),
-                          json.dumps(t["pistas"], ensure_ascii=False), ahora))
+                    self._insertar_tarea_base_con_pasos(cursor, t, ahora)
             else:
-                # Asegurar que el 5.º módulo curricular (Inglés) esté disponible en bases previas
                 for t in tareas_base:
                     if t["categoria"] == "Inglés":
-                        cursor.execute("""
-                            INSERT OR IGNORE INTO tareas (nombre, categoria, pasos_json, pistas_json, es_predeterminada, fecha_creacion)
-                            VALUES (?, ?, ?, ?, 1, ?)
-                        """, (t["nombre"], t["categoria"], json.dumps(t["pasos"], ensure_ascii=False),
-                              json.dumps(t["pistas"], ensure_ascii=False), ahora))
+                        self._insertar_tarea_base_con_pasos(cursor, t, ahora)
 
             preferencias_defecto = {
                 "schema_version": self.SCHEMA_VERSION,
@@ -360,17 +607,27 @@ class RepositorioTDAH:
             }
             for k, v in preferencias_defecto.items():
                 cursor.execute("INSERT OR IGNORE INTO perfil_progreso (clave, valor) VALUES (?, ?)", (k, v))
+            cursor.execute(
+                "UPDATE perfil_progreso SET valor = ? WHERE clave = 'schema_version'",
+                (self.SCHEMA_VERSION,),
+            )
 
-            # Limpiar llave API si una versión previa la guardó en texto plano en SQLite
             cursor.execute("DELETE FROM perfil_progreso WHERE clave = 'gemini_api_key'")
 
             for clave, materia, resp in conocimiento_base:
-                cursor.execute("""
-                    INSERT OR IGNORE INTO conocimiento_escolar (palabra_clave, materia, respuesta_amigable)
-                    VALUES (?, ?, ?)
-                """, (clave, materia, resp))
+                mod_id = (
+                    self._obtener_o_crear_modulo_id(cursor, materia)
+                    if materia in self.MODULOS_CURRICULARES
+                    else None
+                )
+                cursor.execute(
+                    """
+                    INSERT OR IGNORE INTO conocimiento_escolar (modulo_id, palabra_clave, materia, respuesta_amigable)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (mod_id, clave, materia, resp),
+                )
 
-            # Migrar títulos antiguos con emojis de mensajería a títulos limpios si existen
             reemplazos_legado = [
                 ("🎨 5 min de dibujo o plastilina libre", "5 min de dibujo o plastilina libre"),
                 ("🎵 Escuchar mi canción favorita", "Escuchar mi canción favorita"),
@@ -385,19 +642,24 @@ class RepositorioTDAH:
             cursor.execute("SELECT COUNT(*) as total FROM recompensas_catalogo")
             if cursor.fetchone()["total"] == 0:
                 for tit, costo, desc in self.RECOMPENSAS_SUGERIDAS:
-                    cursor.execute("""
+                    cursor.execute(
+                        """
                         INSERT OR IGNORE INTO recompensas_catalogo (titulo, costo_estrellas, descripcion)
                         VALUES (?, ?, ?)
-                    """, (tit, costo, desc))
+                        """,
+                        (tit, costo, desc),
+                    )
             else:
-                # Asegurar que exista el premio inicial rápido (6 ⭐) alcanzable tras la 1.ª misión
                 cursor.execute("SELECT COUNT(*) as c FROM recompensas_catalogo WHERE costo_estrellas <= 6")
                 if cursor.fetchone()["c"] == 0:
                     tit0, costo0, desc0 = self.RECOMPENSAS_SUGERIDAS[0]
-                    cursor.execute("""
+                    cursor.execute(
+                        """
                         INSERT OR IGNORE INTO recompensas_catalogo (titulo, costo_estrellas, descripcion)
                         VALUES (?, ?, ?)
-                    """, (tit0, costo0, desc0))
+                        """,
+                        (tit0, costo0, desc0),
+                    )
 
             conn.commit()
 
@@ -472,6 +734,7 @@ class RepositorioTDAH:
         if self.verificar_pin_docente(pin_ingresado):
             self.guardar_preferencia("pin_intentos_fallidos", "0")
             self.guardar_preferencia("pin_bloqueado_hasta", "0")
+            self.registrar_evento_auditoria("PIN_EXITOSO", "SEGURIDAD", "Acceso docente autorizado")
             return True, self.MAX_INTENTOS_PIN, 0
 
         fallidos = int(self.obtener_preferencia("pin_intentos_fallidos", "0")) + 1
@@ -479,9 +742,19 @@ class RepositorioTDAH:
             hasta = time.time() + self.SEGUNDOS_BLOQUEO_PIN
             self.guardar_preferencia("pin_bloqueado_hasta", f"{hasta:.2f}")
             self.guardar_preferencia("pin_intentos_fallidos", str(fallidos))
+            self.registrar_evento_auditoria(
+                "PIN_BLOQUEADO",
+                "SEGURIDAD",
+                f"Bloqueo temporal por {self.SEGUNDOS_BLOQUEO_PIN}s tras {fallidos} intentos fallidos",
+            )
             return False, 0, self.SEGUNDOS_BLOQUEO_PIN
 
         self.guardar_preferencia("pin_intentos_fallidos", str(fallidos))
+        self.registrar_evento_auditoria(
+            "PIN_FALLIDO",
+            "SEGURIDAD",
+            f"Intento fallido #{fallidos} de ingreso al Panel Docente",
+        )
         return False, self.MAX_INTENTOS_PIN - fallidos, 0
 
     def cambiar_pin_docente(self, nuevo_pin: str):
@@ -493,6 +766,7 @@ class RepositorioTDAH:
         self.guardar_preferencia("pin_personalizado", "1" if limpio != "1234" else "0")
         self.guardar_preferencia("pin_intentos_fallidos", "0")
         self.guardar_preferencia("pin_bloqueado_hasta", "0")
+        self.registrar_evento_auditoria("PIN_CAMBIADO", "SEGURIDAD", "Actualización de PIN docente con PBKDF2-HMAC-SHA256")
 
     # --- GESTIÓN DE MÓDULOS CURRICULARES, TAREAS Y PENSUM ---
     def normalizar_modulo(self, categoria: str) -> str:
@@ -516,17 +790,37 @@ class RepositorioTDAH:
     def listar_tareas(self) -> List[Dict]:
         with self._conectar() as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT * FROM tareas ORDER BY es_predeterminada DESC, id ASC")
+            cursor.execute("""
+                SELECT t.id, t.modulo_id, t.nombre, t.categoria, t.pasos_json, t.pistas_json,
+                       t.es_predeterminada, m.nombre AS nombre_modulo
+                FROM tareas t
+                LEFT JOIN modulos m ON t.modulo_id = m.id
+                ORDER BY t.es_predeterminada DESC, t.id ASC
+            """)
             filas = cursor.fetchall()
             resultado = []
             for f in filas:
+                tid = int(f["id"])
+                cursor.execute(
+                    "SELECT instruccion, pista_apoyo FROM pasos_tarea WHERE tarea_id = ? ORDER BY numero_paso ASC",
+                    (tid,),
+                )
+                filas_pasos = cursor.fetchall()
+                if filas_pasos:
+                    pasos = [r["instruccion"] for r in filas_pasos]
+                    pistas = [r["pista_apoyo"] for r in filas_pasos]
+                else:
+                    pasos = json.loads(f["pasos_json"] or "[]")
+                    pistas = json.loads(f["pistas_json"] or "[]")
+                cat_efectiva = f["nombre_modulo"] or f["categoria"]
                 resultado.append({
-                    "id": f["id"],
+                    "id": tid,
+                    "modulo_id": f["modulo_id"],
                     "nombre": f["nombre"],
-                    "categoria": self.normalizar_modulo(f["categoria"]),
-                    "pasos": json.loads(f["pasos_json"]),
-                    "pistas": json.loads(f["pistas_json"]),
-                    "es_predeterminada": bool(f["es_predeterminada"])
+                    "categoria": self.normalizar_modulo(cat_efectiva),
+                    "pasos": pasos,
+                    "pistas": pistas,
+                    "es_predeterminada": bool(f["es_predeterminada"]),
                 })
             return resultado
 
@@ -540,42 +834,61 @@ class RepositorioTDAH:
 
     def obtener_progreso_modulos(self) -> Dict[str, Tuple[int, int]]:
         """
-        Retorna `{modulo: (misiones_completadas, total_misiones)}` para el indicador
-        visual de progreso por módulo en la vista del estudiante y en el Panel Docente.
+        Retorna `{modulo: (misiones_completadas, total_misiones)}` usando tanto la llave
+        foránea `tarea_id` como el nombre para mantener trazabilidad incluso si se renombra.
         """
         tareas = self.listar_tareas()
         with self._conectar() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                "SELECT DISTINCT LOWER(nombre_tarea) AS nt FROM sesiones_estudio WHERE estado_final = 'COMPLETADA'"
+                "SELECT DISTINCT tarea_id, LOWER(nombre_tarea) AS nt FROM sesiones_estudio WHERE estado_final = 'COMPLETADA'"
             )
-            completadas_set = {row["nt"] for row in cursor.fetchall() if row["nt"]}
+            filas_comp = cursor.fetchall()
+            ids_completados = {int(r["tarea_id"]) for r in filas_comp if r["tarea_id"] is not None}
+            nombres_completados = {r["nt"] for r in filas_comp if r["nt"]}
 
         progreso: Dict[str, Tuple[int, int]] = {}
         for mod in self.MODULOS_CURRICULARES:
             tareas_mod = [t for t in tareas if self.normalizar_modulo(t.get("categoria", "")) == mod]
             total = len(tareas_mod)
-            hechas = sum(1 for t in tareas_mod if t["nombre"].lower() in completadas_set)
+            hechas = sum(
+                1
+                for t in tareas_mod
+                if int(t["id"]) in ids_completados or t["nombre"].lower() in nombres_completados
+            )
             progreso[mod] = (hechas, total)
         return progreso
 
     def guardar_pensum_modulo(self, categoria: str, nombre_archivo: str, texto: str) -> None:
-        """Guarda el resumen del pensum o guía escolar de un módulo en SQLite."""
+        """Guarda el resumen del pensum o guía escolar de un módulo enlazado a `modulos(id)`."""
         mod = self.normalizar_modulo(categoria)
         resumen = re.sub(r"\s+", " ", (texto or "")).strip()[:2400]
         if not resumen:
             return
         ahora = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        arch_limpio = (nombre_archivo or "Guia_Escolar").strip()[:120]
         with self._conectar() as conn:
-            conn.execute("""
-                INSERT INTO pensum_modulos (categoria, nombre_archivo, contenido_resumen, fecha_actualizacion)
-                VALUES (?, ?, ?, ?)
+            cursor = conn.cursor()
+            mod_id = self._obtener_o_crear_modulo_id(cursor, mod)
+            cursor.execute(
+                """
+                INSERT INTO pensum_modulos (categoria, modulo_id, nombre_archivo, contenido_resumen, fecha_actualizacion)
+                VALUES (?, ?, ?, ?, ?)
                 ON CONFLICT(categoria) DO UPDATE SET
+                    modulo_id = excluded.modulo_id,
                     nombre_archivo = excluded.nombre_archivo,
                     contenido_resumen = excluded.contenido_resumen,
                     fecha_actualizacion = excluded.fecha_actualizacion
-            """, (mod, (nombre_archivo or "Guia_Escolar").strip()[:120], resumen, ahora))
+                """,
+                (mod, mod_id, arch_limpio, resumen, ahora),
+            )
             conn.commit()
+        self.registrar_evento_auditoria(
+            "PENSUM_CARGADO",
+            "MODULOS",
+            f"Pensum actualizado para {mod} ({arch_limpio})",
+            referencia_id=mod_id,
+        )
 
     def obtener_pensum_modulo(self, categoria: str) -> Optional[Dict[str, str]]:
         """Recupera el pensum/contexto escolar guardado para el módulo indicado."""
@@ -583,9 +896,13 @@ class RepositorioTDAH:
         with self._conectar() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                "SELECT categoria, nombre_archivo, contenido_resumen, fecha_actualizacion "
-                "FROM pensum_modulos WHERE categoria = ?",
-                (mod,),
+                """
+                SELECT p.categoria, p.modulo_id, p.nombre_archivo, p.contenido_resumen, p.fecha_actualizacion
+                FROM pensum_modulos p
+                LEFT JOIN modulos m ON p.modulo_id = m.id
+                WHERE p.categoria = ? OR m.nombre = ?
+                """,
+                (mod, mod),
             )
             fila = cursor.fetchone()
             return dict(fila) if fila else None
@@ -593,11 +910,6 @@ class RepositorioTDAH:
     def guardar_lote_tareas(
         self, lista_tareas: List[Dict], categoria_defecto: str = "Matemáticas"
     ) -> int:
-        """
-        Guarda en bloque múltiples tareas extraídas de un documento (incluso documentos mixtos,
-        respetando la categoría individual detectada en cada tarea).
-        Retorna la cantidad de tareas guardadas con éxito.
-        """
         guardadas = 0
         for item in lista_tareas or []:
             nombre = str(item.get("nombre", "")).strip()
@@ -614,8 +926,13 @@ class RepositorioTDAH:
                 return t
         return None
 
-    def guardar_tarea(self, nombre: str, pasos: List[str], pistas: Optional[List[str]] = None,
-                      categoria: str = "Personalizada") -> bool:
+    def guardar_tarea(
+        self,
+        nombre: str,
+        pasos: List[str],
+        pistas: Optional[List[str]] = None,
+        categoria: str = "Personalizada",
+    ) -> bool:
         pasos_limpios = [p.strip() for p in pasos if p and p.strip()]
         if not pasos_limpios:
             return False
@@ -630,19 +947,41 @@ class RepositorioTDAH:
                 for i, p in enumerate(pistas[:len(pasos_limpios)])
             ]
 
+        mod_norm = self.normalizar_modulo(categoria)
+        nombre_limpio = nombre.strip()
         ahora = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         with self._conectar() as conn:
             cursor = conn.cursor()
-            cursor.execute("""
-                INSERT INTO tareas (nombre, categoria, pasos_json, pistas_json, es_predeterminada, fecha_creacion)
-                VALUES (?, ?, ?, ?, 0, ?)
+            mod_id = self._obtener_o_crear_modulo_id(cursor, mod_norm)
+            cursor.execute(
+                """
+                INSERT INTO tareas (modulo_id, nombre, categoria, pasos_json, pistas_json, es_predeterminada, fecha_creacion)
+                VALUES (?, ?, ?, ?, ?, 0, ?)
                 ON CONFLICT(nombre) DO UPDATE SET
+                    modulo_id = excluded.modulo_id,
                     categoria = excluded.categoria,
                     pasos_json = excluded.pasos_json,
                     pistas_json = excluded.pistas_json
-            """, (nombre.strip(), categoria, json.dumps(pasos_limpios, ensure_ascii=False),
-                  json.dumps(pistas_completas, ensure_ascii=False), ahora))
+                """,
+                (
+                    mod_id,
+                    nombre_limpio,
+                    mod_norm,
+                    json.dumps(pasos_limpios, ensure_ascii=False),
+                    json.dumps(pistas_completas, ensure_ascii=False),
+                    ahora,
+                ),
+            )
+            cursor.execute("SELECT id FROM tareas WHERE nombre = ?", (nombre_limpio,))
+            tarea_id = int(cursor.fetchone()["id"])
+            self._sincronizar_pasos_normalizados(cursor, tarea_id, pasos_limpios, pistas_completas)
             conn.commit()
+        self.registrar_evento_auditoria(
+            "TAREA_GUARDADA",
+            "TAREAS",
+            f"Misión '{nombre_limpio}' ({mod_norm}) guardada con {len(pasos_limpios)} pasos",
+            referencia_id=tarea_id,
+        )
         return True
 
     def eliminar_tarea(self, nombre: str) -> bool:
@@ -650,34 +989,48 @@ class RepositorioTDAH:
             cursor = conn.cursor()
             cursor.execute("SELECT COUNT(*) as total FROM tareas")
             if cursor.fetchone()["total"] <= 1:
-                # Resguardo de integridad: siempre mantener al menos 1 misión disponible para el niño
                 return False
+            cursor.execute("SELECT id FROM tareas WHERE nombre = ?", (nombre,))
+            row = cursor.fetchone()
+            tid = int(row["id"]) if row else None
             cursor.execute("DELETE FROM tareas WHERE nombre = ?", (nombre,))
             eliminado = cursor.rowcount > 0
             conn.commit()
-            return eliminado
+        if eliminado:
+            self.registrar_evento_auditoria("TAREA_ELIMINADA", "TAREAS", f"Misión '{nombre}' eliminada", referencia_id=tid)
+        return eliminado
 
     def restaurar_misiones_predeterminadas(self) -> None:
-        """Restaura las 4 misiones base sin borrar las misiones personalizadas creadas por el docente."""
+        """Restaura las 5 misiones base junto con sus pasos normalizados."""
         ahora = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         with self._conectar() as conn:
             cursor = conn.cursor()
             for t in self.TAREAS_BASE:
-                cursor.execute("""
-                    INSERT INTO tareas (nombre, categoria, pasos_json, pistas_json, es_predeterminada, fecha_creacion)
-                    VALUES (?, ?, ?, ?, 1, ?)
+                mod_norm = self.normalizar_modulo(t["categoria"])
+                mod_id = self._obtener_o_crear_modulo_id(cursor, mod_norm)
+                cursor.execute(
+                    """
+                    INSERT INTO tareas (modulo_id, nombre, categoria, pasos_json, pistas_json, es_predeterminada, fecha_creacion)
+                    VALUES (?, ?, ?, ?, ?, 1, ?)
                     ON CONFLICT(nombre) DO UPDATE SET
+                        modulo_id = excluded.modulo_id,
                         categoria = excluded.categoria,
                         pasos_json = excluded.pasos_json,
                         pistas_json = excluded.pistas_json,
                         es_predeterminada = 1
-                """, (
-                    t["nombre"],
-                    t["categoria"],
-                    json.dumps(t["pasos"], ensure_ascii=False),
-                    json.dumps(t["pistas"], ensure_ascii=False),
-                    ahora,
-                ))
+                    """,
+                    (
+                        mod_id,
+                        t["nombre"],
+                        mod_norm,
+                        json.dumps(t["pasos"], ensure_ascii=False),
+                        json.dumps(t["pistas"], ensure_ascii=False),
+                        ahora,
+                    ),
+                )
+                cursor.execute("SELECT id FROM tareas WHERE nombre = ?", (t["nombre"],))
+                tid = int(cursor.fetchone()["id"])
+                self._sincronizar_pasos_normalizados(cursor, tid, t["pasos"], t["pistas"])
             conn.commit()
 
     def limpiar_historial_progreso(self, reiniciar_estrellas: bool = False) -> None:
@@ -694,19 +1047,44 @@ class RepositorioTDAH:
             self.guardar_preferencia("estrellas_gastadas", "0")
             self.guardar_preferencia("avatar_skin", "ROBOT_KAWAII")
         else:
-            # Conservar estrellas ganadas y liberar saldo disponible si se borran canjes de prueba
             self.guardar_preferencia("estrellas_gastadas", "0")
+        self.registrar_evento_auditoria(
+            "HISTORIAL_LIMPIADO",
+            "SESIONES",
+            f"Limpieza de historial (reiniciar_estrellas={reiniciar_estrellas})",
+        )
 
     # --- REGISTRO DE SESIONES, DESCANSOS DEL ALUMNO Y GAMIFICACIÓN ---
-    def registrar_evento_descanso(self, nombre_tarea: str, paso_actual: int,
-                                  segundos_transcurridos: int, motivo: str = "Botón Descanso Alumno"):
+    def _resolver_fk_tarea_y_modulo(
+        self, cursor: sqlite3.Cursor, nombre_tarea: str
+    ) -> Tuple[Optional[int], Optional[int]]:
+        cursor.execute(
+            "SELECT id, modulo_id FROM tareas WHERE LOWER(nombre) = LOWER(?)",
+            ((nombre_tarea or "").strip(),),
+        )
+        fila = cursor.fetchone()
+        if fila:
+            return int(fila["id"]), (int(fila["modulo_id"]) if fila["modulo_id"] is not None else None)
+        return None, None
+
+    def registrar_evento_descanso(
+        self,
+        nombre_tarea: str,
+        paso_actual: int,
+        segundos_transcurridos: int,
+        motivo: str = "Botón Descanso Alumno",
+    ):
         ahora = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         with self._conectar() as conn:
             cursor = conn.cursor()
-            cursor.execute("""
-                INSERT INTO bitacora_descansos (fecha_hora, nombre_tarea, paso_actual, segundos_transcurridos, motivo)
-                VALUES (?, ?, ?, ?, ?)
-            """, (ahora, nombre_tarea, paso_actual, segundos_transcurridos, motivo))
+            tarea_id, modulo_id = self._resolver_fk_tarea_y_modulo(cursor, nombre_tarea)
+            cursor.execute(
+                """
+                INSERT INTO bitacora_descansos (tarea_id, modulo_id, fecha_hora, nombre_tarea, paso_actual, segundos_transcurridos, motivo)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (tarea_id, modulo_id, ahora, nombre_tarea, paso_actual, segundos_transcurridos, motivo),
+            )
             conn.commit()
 
     def obtener_bitacora_descansos(self, limite: int = 30) -> List[Dict]:
@@ -715,31 +1093,61 @@ class RepositorioTDAH:
             cursor.execute("SELECT * FROM bitacora_descansos ORDER BY id DESC LIMIT ?", (limite,))
             return [dict(row) for row in cursor.fetchall()]
 
-    def registrar_sesion(self, nombre_tarea: str, pasos_completados: int, total_pasos: int,
-                         segundos_concentracion: int, pausas_activas: int,
-                         pistas_usadas: int, estrellas_ganadas: int,
-                         estado_final: str = "COMPLETADA",
-                         pausas_manuales: int = 0,
-                         intervalo_promedio_descanso_seg: int = 0):
+    def registrar_sesion(
+        self,
+        nombre_tarea: str,
+        pasos_completados: int,
+        total_pasos: int,
+        segundos_concentracion: int,
+        pausas_activas: int,
+        pistas_usadas: int,
+        estrellas_ganadas: int,
+        estado_final: str = "COMPLETADA",
+        pausas_manuales: int = 0,
+        intervalo_promedio_descanso_seg: int = 0,
+    ):
         ahora = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         with self._conectar() as conn:
             cursor = conn.cursor()
-            cursor.execute("""
+            tarea_id, modulo_id = self._resolver_fk_tarea_y_modulo(cursor, nombre_tarea)
+            cursor.execute(
+                """
                 INSERT INTO sesiones_estudio (
-                    fecha_hora, nombre_tarea, pasos_completados, total_pasos,
+                    tarea_id, modulo_id, fecha_hora, nombre_tarea, pasos_completados, total_pasos,
                     segundos_concentracion, pausas_activas, pausas_manuales,
                     intervalo_promedio_descanso_seg, pistas_usadas,
                     estrellas_ganadas, estado_final
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (ahora, nombre_tarea, pasos_completados, total_pasos,
-                  segundos_concentracion, pausas_activas, pausas_manuales,
-                  intervalo_promedio_descanso_seg, pistas_usadas,
-                  estrellas_ganadas, estado_final))
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    tarea_id,
+                    modulo_id,
+                    ahora,
+                    nombre_tarea,
+                    pasos_completados,
+                    total_pasos,
+                    segundos_concentracion,
+                    pausas_activas,
+                    pausas_manuales,
+                    intervalo_promedio_descanso_seg,
+                    pistas_usadas,
+                    estrellas_ganadas,
+                    estado_final,
+                ),
+            )
+            sesion_id = int(cursor.lastrowid)
             conn.commit()
 
         if estado_final == "COMPLETADA":
             actual_tareas = int(self.obtener_preferencia("tareas_completadas", "0"))
             self.guardar_preferencia("tareas_completadas", str(actual_tareas + 1))
+
+        self.registrar_evento_auditoria(
+            "SESION_REGISTRADA",
+            "SESIONES",
+            f"Sesión {estado_final}: '{nombre_tarea}' ({pasos_completados}/{total_pasos} pasos, +{estrellas_ganadas} pts)",
+            referencia_id=sesion_id,
+        )
 
     def sumar_estrellas(self, cantidad: int) -> int:
         actual = int(self.obtener_preferencia("estrellas_totales", "0"))
@@ -767,8 +1175,12 @@ class RepositorioTDAH:
             cursor.execute("SELECT * FROM recompensas_catalogo ORDER BY costo_estrellas ASC, id ASC")
             return [dict(row) for row in cursor.fetchall()]
 
-    def agregar_recompensa_catalogo(self, titulo: str, costo_estrellas: int,
-                                    descripcion: str = "Premio pactado con familia/docente") -> bool:
+    def agregar_recompensa_catalogo(
+        self,
+        titulo: str,
+        costo_estrellas: int,
+        descripcion: str = "Premio pactado con familia/docente",
+    ) -> bool:
         tit = re.sub(r"\s+", " ", (titulo or "")).strip()[:90]
         costo = max(1, min(999, int(costo_estrellas)))
         desc = re.sub(r"\s+", " ", (descripcion or "")).strip()[:140]
@@ -776,13 +1188,16 @@ class RepositorioTDAH:
             return False
         with self._conectar() as conn:
             cursor = conn.cursor()
-            cursor.execute("""
+            cursor.execute(
+                """
                 INSERT INTO recompensas_catalogo (titulo, costo_estrellas, descripcion)
                 VALUES (?, ?, ?)
                 ON CONFLICT(titulo) DO UPDATE SET
                     costo_estrellas = excluded.costo_estrellas,
                     descripcion = excluded.descripcion
-            """, (tit, costo, desc))
+                """,
+                (tit, costo, desc),
+            )
             conn.commit()
         return True
 
@@ -807,13 +1222,16 @@ class RepositorioTDAH:
             cursor = conn.cursor()
             cursor.executemany("DELETE FROM recompensas_catalogo WHERE titulo = ?", [(t,) for t in titulos_legado])
             for tit, costo, desc in self.RECOMPENSAS_SUGERIDAS:
-                cursor.execute("""
+                cursor.execute(
+                    """
                     INSERT INTO recompensas_catalogo (titulo, costo_estrellas, descripcion)
                     VALUES (?, ?, ?)
                     ON CONFLICT(titulo) DO UPDATE SET
                         costo_estrellas = excluded.costo_estrellas,
                         descripcion = excluded.descripcion
-                """, (tit, costo, desc))
+                    """,
+                    (tit, costo, desc),
+                )
             conn.commit()
 
     def canjear_recompensa(self, recompensa_id: int) -> Tuple[bool, str, int]:
@@ -825,6 +1243,7 @@ class RepositorioTDAH:
             if not fila:
                 return False, "El premio seleccionado ya no existe.", self.obtener_estrellas_disponibles()
 
+            rid = int(fila["id"])
             titulo = fila["titulo"]
             costo = int(fila["costo_estrellas"])
 
@@ -849,16 +1268,29 @@ class RepositorioTDAH:
             nuevo_saldo = max(0, totales - nuevas_gastadas)
             ahora = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-            cursor.execute("""
+            cursor.execute(
+                """
                 INSERT INTO perfil_progreso (clave, valor) VALUES ('estrellas_gastadas', ?)
                 ON CONFLICT(clave) DO UPDATE SET valor = excluded.valor
-            """, (str(nuevas_gastadas),))
-            cursor.execute("""
-                INSERT INTO historial_canjes (fecha_hora, titulo_premio, costo_estrellas)
-                VALUES (?, ?, ?)
-            """, (ahora, titulo, costo))
+                """,
+                (str(nuevas_gastadas),),
+            )
+            cursor.execute(
+                """
+                INSERT INTO historial_canjes (recompensa_id, fecha_hora, titulo_premio, costo_estrellas)
+                VALUES (?, ?, ?, ?)
+                """,
+                (rid, ahora, titulo, costo),
+            )
             conn.commit()
-            return True, f"¡Felicidades! Canjeaste «{titulo}» (-{costo} puntos).", nuevo_saldo
+
+        self.registrar_evento_auditoria(
+            "PREMIO_CANJEADO",
+            "RECOMPENSAS",
+            f"Canje de '{titulo}' por {costo} puntos (saldo restante: {nuevo_saldo})",
+            referencia_id=rid,
+        )
+        return True, f"¡Felicidades! Canjeaste «{titulo}» (-{costo} puntos).", nuevo_saldo
 
     def obtener_historial_canjes(self, limite: int = 30) -> List[Dict]:
         with self._conectar() as conn:
@@ -876,10 +1308,13 @@ class RepositorioTDAH:
     def guardar_preferencia(self, clave: str, valor: str):
         with self._conectar() as conn:
             cursor = conn.cursor()
-            cursor.execute("""
+            cursor.execute(
+                """
                 INSERT INTO perfil_progreso (clave, valor) VALUES (?, ?)
                 ON CONFLICT(clave) DO UPDATE SET valor = excluded.valor
-            """, (clave, str(valor)))
+                """,
+                (clave, str(valor)),
+            )
             conn.commit()
 
     def obtener_historial_sesiones(self, limite: int = 50) -> List[Dict]:
@@ -912,8 +1347,7 @@ class RepositorioTDAH:
     def buscar_conocimiento(self, consulta: str) -> Optional[str]:
         """
         Busca respuestas escolares locales usando límites de palabra exactos (`\\b`)
-        para no interceptar por accidente saludos acompañados de preguntas reales
-        (ej. «Hola Haru, ¿por qué brillan las estrellas?» debe pasar a la IA).
+        para no interceptar por accidente saludos acompañados de preguntas reales.
         """
         consulta_norm = _quitar_tildes((consulta or "").lower()).strip()
         if not consulta_norm:
@@ -930,7 +1364,6 @@ class RepositorioTDAH:
             cursor.execute("SELECT palabra_clave, materia, respuesta_amigable FROM conocimiento_escolar")
             filas = cursor.fetchall()
 
-        # Ordenar claves más específicas primero ("ciclo del agua" antes que "agua"/"hola")
         filas_ordenadas = sorted(filas, key=lambda r: len(r["palabra_clave"]), reverse=True)
         for row in filas_ordenadas:
             clave_norm = _quitar_tildes(row["palabra_clave"].lower()).strip()
@@ -940,12 +1373,10 @@ class RepositorioTDAH:
             if not re.search(patron, consulta_norm):
                 continue
 
-            # Si es solo un saludo ("hola"), responder rápido únicamente si no trae otra pregunta detrás
             if clave_norm == "hola" and (len(palabras_consulta) > 4 or "?" in consulta or tiene_interrogativo_complejo):
                 continue
 
-            # Si es concepto corto de 1 palabra pero la pregunta pide explicación compleja más larga, dejar que la IA contextualice si está activa
-            if len(clave_norm.split()) == 1 and len(palabras_consulta) > 7 and tiene_interrogativo_complejo and row["materia"] not in ("Identidad", "Apoyo Emocional"):
+            if len(clave_norm.split()) == 1 and len(palabras_consulta) > 7 and tiene_interrogativo_complejo and row["materia"] not in ("Identidad", "Apoyo Emocional", "Hábitos y Orden"):
                 continue
 
             return row["respuesta_amigable"]

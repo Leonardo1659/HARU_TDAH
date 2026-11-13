@@ -1670,10 +1670,10 @@ class PanelDocente(ctk.CTkToplevel):
         fila_key.pack(fill="x", padx=18, pady=(4, 16))
 
         ctk.CTkLabel(fila_key, text="Clave Gemini (.env):", font=ctk.CTkFont(size=12, weight="bold"), text_color=self.tema["text_primary"]).pack(side="left", padx=(0, 8))
-        self.entry_api_key = ctk.CTkEntry(fila_key, width=330, height=36, corner_radius=12, show="•")
+        self.entry_api_key = ctk.CTkEntry(fila_key, width=220, height=36, corner_radius=12, show="•")
         if self.ia and self.ia.api_key:
             self.entry_api_key.insert(0, self.ia.api_key)
-        self.entry_api_key.pack(side="left", padx=4)
+        self.entry_api_key.pack(side="left", fill="x", expand=True, padx=4)
         self.entry_api_key.bind("<Return>", lambda _e: self._guardar_key_ia())
 
         self._mostrando_key = False

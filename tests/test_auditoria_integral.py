@@ -739,6 +739,25 @@ class TestAuditoriaIntegralHaru(unittest.TestCase):
             evs = self.bus.extraer_pendientes()
             self.assertTrue(any(e.tipo == "nudge_atencion" for e in evs))
 
+            # Verificar normalización relacional 3FN, FKs reales y bitácora de auditoría
+            with self.db._conectar() as conn:
+                cur = conn.cursor()
+                for tabla_fk in (
+                    "tareas",
+                    "pasos_tarea",
+                    "sesiones_estudio",
+                    "bitacora_descansos",
+                    "historial_canjes",
+                    "pensum_modulos",
+                    "conocimiento_escolar",
+                ):
+                    cur.execute(f"PRAGMA foreign_key_list({tabla_fk})")
+                    self.assertGreaterEqual(len(cur.fetchall()), 1, f"Falta FK en {tabla_fk}")
+                cur.execute("SELECT COUNT(*) AS c FROM pasos_tarea")
+                self.assertGreaterEqual(cur.fetchone()["c"], 15)
+            eventos_aud = self.db.obtener_auditoria_eventos(limite=20)
+            self.assertGreaterEqual(len(eventos_aud), 2)
+
             panel.cerrar_panel()
         finally:
             root.destroy()
