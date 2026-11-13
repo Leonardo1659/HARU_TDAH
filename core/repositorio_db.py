@@ -61,7 +61,7 @@ def _formatear_duracion_humana(segundos: int) -> str:
 
 
 class RepositorioTDAH:
-    SCHEMA_VERSION = "3"
+    SCHEMA_VERSION = "4"
     PBKDF2_ITERATIONS = 120_000
     MAX_INTENTOS_PIN = 3
     SEGUNDOS_BLOQUEO_PIN = 45
@@ -170,15 +170,12 @@ class RepositorioTDAH:
                     (mod_nom, self.DESCRIPCIONES_MODULOS.get(mod_nom, ""), idx),
                 )
 
-            # 2. Tabla de Tareas Escolares (con FK a modulos)
+            # 2. Tabla de Tareas Escolares en 3FN Estricta (con FK obligatoria a modulos)
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS tareas (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    modulo_id INTEGER REFERENCES modulos(id) ON UPDATE CASCADE ON DELETE RESTRICT,
+                    modulo_id INTEGER NOT NULL REFERENCES modulos(id) ON UPDATE CASCADE ON DELETE RESTRICT,
                     nombre TEXT UNIQUE NOT NULL,
-                    categoria TEXT NOT NULL DEFAULT 'Matemáticas',
-                    pasos_json TEXT NOT NULL DEFAULT '[]',
-                    pistas_json TEXT NOT NULL DEFAULT '[]',
                     es_predeterminada INTEGER NOT NULL DEFAULT 0,
                     fecha_creacion TEXT NOT NULL
                 )
@@ -293,13 +290,14 @@ class RepositorioTDAH:
                 )
             """)
 
-            self._migrar_esquema_relacional_3fn(cursor)
+            self._migrar_esquema_relacional_3fn(conn, cursor)
             conn.commit()
 
-    def _migrar_esquema_relacional_3fn(self, cursor: sqlite3.Cursor) -> None:
+    def _migrar_esquema_relacional_3fn(self, conn: sqlite3.Connection, cursor: sqlite3.Cursor) -> None:
         """
         Actualiza de forma transparente bases de datos previas agregando las llaves
-        foráneas (`modulo_id`, `tarea_id`, `recompensa_id`) y poblando `pasos_tarea`.
+        foráneas (`modulo_id`, `tarea_id`, `recompensa_id`), poblando `pasos_tarea`
+        y eliminando columnas desnormalizadas antiguas (`pasos_json`, `pistas_json`, `categoria`).
         """
         def _cols(tabla: str) -> List[str]:
             cursor.execute(f"PRAGMA table_info({tabla})")
@@ -310,6 +308,7 @@ class RepositorioTDAH:
             cursor.execute(
                 "ALTER TABLE tareas ADD COLUMN modulo_id INTEGER REFERENCES modulos(id) ON UPDATE CASCADE ON DELETE RESTRICT"
             )
+            cols_tareas = _cols("tareas")
 
         cols_sesiones = _cols("sesiones_estudio")
         if "pausas_manuales" not in cols_sesiones:
@@ -353,24 +352,52 @@ class RepositorioTDAH:
                 "ALTER TABLE pensum_modulos ADD COLUMN modulo_id INTEGER REFERENCES modulos(id) ON UPDATE CASCADE ON DELETE CASCADE"
             )
 
-        # Poblar modulo_id y pasos_tarea para tareas existentes
-        cursor.execute("SELECT id, categoria, pasos_json, pistas_json, modulo_id FROM tareas")
-        for t in cursor.fetchall():
-            mod_id = self._obtener_o_crear_modulo_id(cursor, t["categoria"])
-            if t["modulo_id"] != mod_id:
+        # Poblar modulo_id y pasos_tarea desde columnas legado si existen
+        tiene_legado_tareas = any(c in cols_tareas for c in ("pasos_json", "pistas_json", "categoria"))
+        if tiene_legado_tareas:
+            cursor.execute("SELECT * FROM tareas")
+            for t in cursor.fetchall():
+                t_dict = dict(t)
+                cat_txt = t_dict.get("categoria") or "Matemáticas"
+                mod_id = t_dict.get("modulo_id") or self._obtener_o_crear_modulo_id(cursor, cat_txt)
+                cursor.execute("UPDATE tareas SET modulo_id = ? WHERE id = ?", (mod_id, t_dict["id"]))
+                cursor.execute("SELECT COUNT(*) as c FROM pasos_tarea WHERE tarea_id = ?", (t_dict["id"],))
+                if cursor.fetchone()["c"] == 0 and "pasos_json" in t_dict:
+                    try:
+                        pasos = json.loads(t_dict.get("pasos_json") or "[]")
+                        pistas = json.loads(t_dict.get("pistas_json") or "[]")
+                        if pasos:
+                            self._sincronizar_pasos_normalizados(cursor, int(t_dict["id"]), pasos, pistas)
+                    except Exception:
+                        pass
+
+            # Reconstruir tabla `tareas` en 3FN pura sin `pasos_json`, `pistas_json` ni `categoria`
+            conn.commit()
+            conn.execute("PRAGMA foreign_keys=OFF")
+            try:
+                cursor.execute("""
+                    CREATE TABLE tareas_3fn (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        modulo_id INTEGER NOT NULL REFERENCES modulos(id) ON UPDATE CASCADE ON DELETE RESTRICT,
+                        nombre TEXT UNIQUE NOT NULL,
+                        es_predeterminada INTEGER NOT NULL DEFAULT 0,
+                        fecha_creacion TEXT NOT NULL
+                    )
+                """)
+                mod_defecto = self._obtener_o_crear_modulo_id(cursor, "Matemáticas")
                 cursor.execute(
-                    "UPDATE tareas SET modulo_id = ?, categoria = ? WHERE id = ?",
-                    (mod_id, self.normalizar_modulo(t["categoria"]), t["id"]),
+                    """
+                    INSERT INTO tareas_3fn (id, modulo_id, nombre, es_predeterminada, fecha_creacion)
+                    SELECT id, COALESCE(modulo_id, ?), nombre, es_predeterminada, fecha_creacion
+                    FROM tareas
+                    """,
+                    (mod_defecto,),
                 )
-            cursor.execute("SELECT COUNT(*) as c FROM pasos_tarea WHERE tarea_id = ?", (t["id"],))
-            if cursor.fetchone()["c"] == 0:
-                try:
-                    pasos = json.loads(t["pasos_json"] or "[]")
-                    pistas = json.loads(t["pistas_json"] or "[]")
-                    if pasos:
-                        self._sincronizar_pasos_normalizados(cursor, int(t["id"]), pasos, pistas)
-                except Exception:
-                    pass
+                cursor.execute("DROP TABLE tareas")
+                cursor.execute("ALTER TABLE tareas_3fn RENAME TO tareas")
+                conn.commit()
+            finally:
+                conn.execute("PRAGMA foreign_keys=ON")
 
         # Enlazar registros históricos existentes con sus FKs correspondientes
         cursor.execute("""
@@ -515,17 +542,10 @@ class RepositorioTDAH:
         mod_id = self._obtener_o_crear_modulo_id(cursor, mod_norm)
         cursor.execute(
             """
-            INSERT OR IGNORE INTO tareas (modulo_id, nombre, categoria, pasos_json, pistas_json, es_predeterminada, fecha_creacion)
-            VALUES (?, ?, ?, ?, ?, 1, ?)
+            INSERT OR IGNORE INTO tareas (modulo_id, nombre, es_predeterminada, fecha_creacion)
+            VALUES (?, ?, 1, ?)
             """,
-            (
-                mod_id,
-                t["nombre"],
-                mod_norm,
-                json.dumps(t["pasos"], ensure_ascii=False),
-                json.dumps(t["pistas"], ensure_ascii=False),
-                ahora,
-            ),
+            (mod_id, t["nombre"], ahora),
         )
         cursor.execute("SELECT id FROM tareas WHERE nombre = ?", (t["nombre"],))
         row_t = cursor.fetchone()
@@ -791,8 +811,7 @@ class RepositorioTDAH:
         with self._conectar() as conn:
             cursor = conn.cursor()
             cursor.execute("""
-                SELECT t.id, t.modulo_id, t.nombre, t.categoria, t.pasos_json, t.pistas_json,
-                       t.es_predeterminada, m.nombre AS nombre_modulo
+                SELECT t.id, t.modulo_id, t.nombre, t.es_predeterminada, m.nombre AS nombre_modulo
                 FROM tareas t
                 LEFT JOIN modulos m ON t.modulo_id = m.id
                 ORDER BY t.es_predeterminada DESC, t.id ASC
@@ -806,13 +825,9 @@ class RepositorioTDAH:
                     (tid,),
                 )
                 filas_pasos = cursor.fetchall()
-                if filas_pasos:
-                    pasos = [r["instruccion"] for r in filas_pasos]
-                    pistas = [r["pista_apoyo"] for r in filas_pasos]
-                else:
-                    pasos = json.loads(f["pasos_json"] or "[]")
-                    pistas = json.loads(f["pistas_json"] or "[]")
-                cat_efectiva = f["nombre_modulo"] or f["categoria"]
+                pasos = [r["instruccion"] for r in filas_pasos]
+                pistas = [r["pista_apoyo"] for r in filas_pasos]
+                cat_efectiva = f["nombre_modulo"] or "Matemáticas"
                 resultado.append({
                     "id": tid,
                     "modulo_id": f["modulo_id"],
@@ -955,22 +970,12 @@ class RepositorioTDAH:
             mod_id = self._obtener_o_crear_modulo_id(cursor, mod_norm)
             cursor.execute(
                 """
-                INSERT INTO tareas (modulo_id, nombre, categoria, pasos_json, pistas_json, es_predeterminada, fecha_creacion)
-                VALUES (?, ?, ?, ?, ?, 0, ?)
+                INSERT INTO tareas (modulo_id, nombre, es_predeterminada, fecha_creacion)
+                VALUES (?, ?, 0, ?)
                 ON CONFLICT(nombre) DO UPDATE SET
-                    modulo_id = excluded.modulo_id,
-                    categoria = excluded.categoria,
-                    pasos_json = excluded.pasos_json,
-                    pistas_json = excluded.pistas_json
+                    modulo_id = excluded.modulo_id
                 """,
-                (
-                    mod_id,
-                    nombre_limpio,
-                    mod_norm,
-                    json.dumps(pasos_limpios, ensure_ascii=False),
-                    json.dumps(pistas_completas, ensure_ascii=False),
-                    ahora,
-                ),
+                (mod_id, nombre_limpio, ahora),
             )
             cursor.execute("SELECT id FROM tareas WHERE nombre = ?", (nombre_limpio,))
             tarea_id = int(cursor.fetchone()["id"])
@@ -1010,23 +1015,13 @@ class RepositorioTDAH:
                 mod_id = self._obtener_o_crear_modulo_id(cursor, mod_norm)
                 cursor.execute(
                     """
-                    INSERT INTO tareas (modulo_id, nombre, categoria, pasos_json, pistas_json, es_predeterminada, fecha_creacion)
-                    VALUES (?, ?, ?, ?, ?, 1, ?)
+                    INSERT INTO tareas (modulo_id, nombre, es_predeterminada, fecha_creacion)
+                    VALUES (?, ?, 1, ?)
                     ON CONFLICT(nombre) DO UPDATE SET
                         modulo_id = excluded.modulo_id,
-                        categoria = excluded.categoria,
-                        pasos_json = excluded.pasos_json,
-                        pistas_json = excluded.pistas_json,
                         es_predeterminada = 1
                     """,
-                    (
-                        mod_id,
-                        t["nombre"],
-                        mod_norm,
-                        json.dumps(t["pasos"], ensure_ascii=False),
-                        json.dumps(t["pistas"], ensure_ascii=False),
-                        ahora,
-                    ),
+                    (mod_id, t["nombre"], ahora),
                 )
                 cursor.execute("SELECT id FROM tareas WHERE nombre = ?", (t["nombre"],))
                 tid = int(cursor.fetchone()["id"])
