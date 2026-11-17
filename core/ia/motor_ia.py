@@ -11,27 +11,37 @@ Cadena de resolución inteligente, ligera y gratuita (0 MB de SDKs pesados):
 4. Capa Pedagógica Empática: Andamiaje contextual paso a paso sin conexión.
 """
 
+from datetime import datetime
 import json
 import os
 import re
 import time
+import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Union
 
 from core.archivos_estudio import DocumentoEstudio
 from core.config import ENV_PATH, MODELO_GEMINI_DEFECTO, OLLAMA_URL_BASE, cargar_env_local
-from core.ia.calculadora_ast import resolver_pregunta_matematica
+from core.ia.calculadora_ast import evaluar_ast_seguro, resolver_pregunta_matematica
 
 SYSTEM_INSTRUCTION_HARU = (
-    "Eres Haru, un tierno, cálido y paciente compañero virtual educativo para niños de "
-    "primaria (6 a 11 años) con TDAH en Bolivia. Tus respuestas deben ser muy breves "
-    "(máximo 2 a 3 oraciones cortas, sin listas largas ni símbolos Markdown como **), "
-    "alegres, motivadoras, fáciles de entender y sin tecnicismos. Nunca entregues toda "
-    "la tarea resuelta sin explicar; guía al niño paso a paso con cariño. "
-    "No pidas ni repitas datos personales del niño."
+    "Eres Haru, un tierno, cálido, inteligente y paciente compañero virtual educativo para niños de "
+    "primaria (6 a 11 años) con TDAH en Bolivia. "
+    "ÁMBITO PERMITIDO: tareas escolares, estudio paso a paso, técnicas para concentrarse y recordar, "
+    "la hora/organización diaria, hábitos saludables y curiosidades educativas seguras para niños. "
+    "RESTRICCIONES ESTRICTAS: si te preguntan sobre novios/novias, romance, sexualidad, videojuegos comerciales "
+    "(Free Fire, Fortnite, Roblox, etc.), violencia, armas, drogas, apuestas o cómo hacer trampa, "
+    "declina con amabilidad en una oración y redirige al estudio. "
+    "Responde en 2 a 4 oraciones claras, sin usar asteriscos ni Markdown, guiando paso a paso con ejemplos reales."
 )
+
+
+def _normalizar_ia(texto: str) -> str:
+    nfkd = unicodedata.normalize("NFKD", (texto or "").lower())
+    sin_tildes = "".join(c for c in nfkd if not unicodedata.combining(c))
+    return re.sub(r"\s+", " ", sin_tildes).strip()
 
 
 def _limpiar_respuesta_ia(texto: str, max_chars: int = 340) -> str:
@@ -455,8 +465,211 @@ class MotorIAHaru:
         )
 
     # =========================================================================
-    # 1. TUTOR ACADÉMICO GUIADO EN CAPAS
+    # 1. TUTOR ACADÉMICO GUIADO EN CAPAS + GUARDRAILS + DOCUMENTOS
     # =========================================================================
+    def _verificar_restriccion_tematica(self, texto: str) -> Optional[str]:
+        """Bloquea con respeto temas no aptos o ajenos a un tutor escolar de primaria."""
+        norm = _normalizar_ia(texto)
+        if not norm:
+            return None
+
+        if re.search(
+            r"\b(novia|novio|enamorar(?:me|se)?|enamorad[oa]|besar|beso|ligar|conquistar|"
+            r"cita\s+romantica|tener\s+pareja|sexo|sexual|desnud\w*|porno\w*|erotic\w*|"
+            r"contenido\s+para\s+adultos|paginas?\s+para\s+adultos)\b",
+            norm,
+        ):
+            self.ultima_fuente = "Filtro Guardián Infantil"
+            return (
+                "Soy Haru, tu compañero educativo para primaria, así que no converso sobre novios, romance ni temas de adultos. "
+                "Si quieres ayuda con tus tareas, cómo concentrarte o dudas de clase, ¡aquí estoy para ti!"
+            )
+
+        if re.search(
+            r"\b(free\s*fire|fortnite|warzone|valorant|call\s+of\s+duty|gta|roblox|"
+            r"brawl\s+stars|clash\s+royale|pubg|headshot|diamantes\s+gratis|minecraft\s+pvp|"
+            r"tiktok|apuestas?|casino|hackear|cheats?)\b",
+            norm,
+        ):
+            self.ultima_fuente = "Filtro Guardián Infantil"
+            return (
+                "Estoy aquí para ayudarte en tus materias de primaria y hábitos de estudio, no doy trucos ni consejos de videojuegos o redes. "
+                "¡Avancemos tus pasitos de tarea primero para que luego disfrutes tu tiempo libre tranquilo!"
+            )
+
+        if re.search(
+            r"\b(pelear(?:me|se)?|golpear|matar|pistola|arma|cuchillo|droga\w*|alcohol|"
+            r"cerveza|cigarrillo|vape\w*|hacer\s+trampa|copiar\s+en\s+el\s+examen|pasame\s+las\s+respuestas)\b",
+            norm,
+        ):
+            self.ultima_fuente = "Filtro Guardián Infantil"
+            return (
+                "Como tu tutor escolar cuido tu seguridad y aprendizaje honesto, por eso no ayudo con violencia, armas, sustancias ni trampas. "
+                "Cuéntame qué ejercicio o materia quieres aprender y lo resolvemos paso a paso."
+            )
+        return None
+
+    def _responder_vida_cotidiana_y_estudio(self, pregunta: str) -> Optional[str]:
+        """Responde dudas cotidianas útiles (hora, fecha, hábitos de estudio, concentración)."""
+        norm = _normalizar_ia(pregunta)
+        if not norm:
+            return None
+
+        if re.search(r"\b(que\s+hora\s+(es|son)|dime\s+la\s+hora|hora\s+actual|sabes\s+la\s+hora|tienes\s+la\s+hora)\b", norm):
+            ahora = datetime.now()
+            periodo = "de la mañana" if ahora.hour < 12 else ("de la tarde" if ahora.hour < 19 else "de la noche")
+            self.ultima_fuente = "Reloj y Guía Diaria Haru"
+            return f"Son las {ahora.strftime('%H:%M')} {periodo}. ¡Buen momento para hacer un pasito con calma o tomar un descanso breve!"
+
+        if re.search(r"\b(que\s+dia\s+es\s+(hoy|ahora)|cual\s+es\s+la\s+fecha|fecha\s+de\s+hoy|en\s+que\s+fecha\s+estamos)\b", norm):
+            ahora = datetime.now()
+            dias = ("lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo")
+            meses = (
+                "enero", "febrero", "marzo", "abril", "mayo", "junio",
+                "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre",
+            )
+            self.ultima_fuente = "Reloj y Guía Diaria Haru"
+            return f"Hoy es {dias[ahora.weekday()]} {ahora.day} de {meses[ahora.month - 1]} de {ahora.year}. ¡Organicemos tus tareas del día paso a paso!"
+
+        pide_consejo = any(
+            w in norm for w in ("como", "mejorar", "consejo", "tips", "ayuda", "puedo", "organizar", "sacar")
+        )
+        if re.search(r"\b(mejorar\s+(?:en\s+)?(?:mis|los)\s+estudios|estudiar\s+mejor|rendir\s+mejor|sacar\s+buenas\s+notas|mejorar\s+(?:mis\s+)?calificaciones|habitos\s+de\s+estudio|como\s+estudio)\b", norm):
+            self.ultima_fuente = "Tutor Pedagógico Haru"
+            return (
+                "Para mejorar en tus estudios: 1) despeja tu mesa dejando solo un cuaderno, "
+                "2) divide cada tarea en bloques cortos de 10 minutos con 2 minutos de descanso, "
+                "y 3) al terminar, explícate en voz alta con tus propias palabras lo que aprendiste."
+            )
+
+        if pide_consejo and re.search(r"\b(concentr\w*|no\s+distra\w*|atencion|enfocar\w*|foco|organizar\s+(?:mis\s+)?tareas)\b", norm):
+            self.ultima_fuente = "Tutor Pedagógico Haru"
+            return (
+                "Para concentrarte mejor: aparta juguetes o pantallas de tu escritorio, usa el reloj de Haru por 10 minutos "
+                "y enfócate únicamente en el paso actual antes de pasar al siguiente."
+            )
+
+        if pide_consejo and re.search(r"\b(examen\w*|evaluacion\w*|memori\w*|no\s+olvid\w*|acordarme)\b", norm):
+            self.ultima_fuente = "Tutor Pedagógico Haru"
+            return (
+                "Para recordar mejor para un examen: lee cada idea en voz alta, dibuja o escribe un ejemplo propio en tu cuaderno "
+                "y descansa bien la noche anterior para que tu cerebro ordene lo aprendido."
+            )
+
+        if pide_consejo and re.search(r"\b(nervios\w*|frustrad\w*|enojad\w*|triste|no\s+me\s+sale|estres)\b", norm):
+            self.ultima_fuente = "Tutor Pedagógico Haru"
+            return (
+                "Cuando te sientas frustrado o nervioso es normal: toca el botón Respirar para tomar 3 respiraciones suaves, "
+                "toma un poquito de agua y luego resolvamos juntos solo el primer pedacito del ejercicio."
+            )
+
+        return None
+
+    @staticmethod
+    def _explicar_operacion_primaria(a: float, op: str, b: float, res: float) -> str:
+        a_s = str(int(a)) if a == int(a) else str(round(a, 2))
+        b_s = str(int(b)) if b == int(b) else str(round(b, 2))
+        r_s = str(int(res)) if res == int(res) else str(round(res, 2))
+        if op == "+":
+            if abs(a) >= 10 and abs(b) >= 10 and a == int(a) and b == int(b):
+                u_sum = (int(a) % 10) + (int(b) % 10)
+                return f"Para sumar {a_s} + {b_s}, alinea unidades ({int(a)%10}+{int(b)%10}={u_sum}) y luego las decenas: da {r_s}."
+            return f"Para sumar {a_s} + {b_s}, parte desde {a_s} y agrega {b_s}: el resultado es {r_s}."
+        if op == "-":
+            if abs(a) >= 10 and abs(b) >= 10 and a == int(a) and b == int(b):
+                return f"Para restar {a_s} - {b_s}, resta primero las unidades y luego las decenas en columna: queda {r_s}."
+            return f"Para restar {a_s} - {b_s}, quita {b_s} a {a_s}: el resultado es {r_s}."
+        if op == "*":
+            return f"Para multiplicar {a_s} × {b_s}, suma {a_s} veces el número {b_s}: obtienes {r_s}."
+        if op == "/":
+            return f"Para dividir {a_s} ÷ {b_s}, reparte {a_s} en {b_s} grupos iguales: a cada grupo le toca {r_s}."
+        return f"La operación {a_s} {op} {b_s} da como resultado {r_s}."
+
+    def _analizar_operaciones_en_texto(self, texto: str) -> List[Tuple[str, Union[int, float], str]]:
+        """Detecta y evalúa de forma segura (`ast`) operaciones aritméticas en guías o ejercicios."""
+        limpio = (texto or "").replace("×", "*").replace("÷", "/")
+        limpio = re.sub(r"(?<=\d)\s*[xX]\s*(?=\d)", " * ", limpio)
+        resultados: List[Tuple[str, Union[int, float], str]] = []
+        vistos = set()
+        for m in re.finditer(r"(\d+(?:\.\d+)?)\s*([+\-*/])\s*(\d+(?:\.\d+)?)", limpio):
+            a_str, op, b_str = m.group(1), m.group(2), m.group(3)
+            expr = f"{a_str} {op} {b_str}"
+            if expr in vistos:
+                continue
+            try:
+                val = evaluar_ast_seguro(expr)
+            except Exception:
+                continue
+            vistos.add(expr)
+            op_vis = {"*": "×", "/": "÷"}.get(op, op)
+            etq = f"{a_str} {op_vis} {b_str}"
+            val_num: Union[int, float] = int(val) if val == int(val) else round(float(val), 2)
+            explicacion = self._explicar_operacion_primaria(float(a_str), op, float(b_str), float(val))
+            resultados.append((etq, val_num, explicacion))
+        return resultados
+
+    def _extraer_bloque_ejercicio_documento(self, documento_texto: str, pregunta: str) -> str:
+        """Localiza el ejercicio o sección exacta del documento que el niño preguntó."""
+        lineas = [ln.strip() for ln in (documento_texto or "").splitlines() if ln.strip()]
+        if not lineas:
+            return ""
+        q_norm = _normalizar_ia(pregunta)
+        if not q_norm:
+            return "\n".join(lineas[:8])[:1400]
+
+        ordinales = {
+            "primero": 1, "primer": 1, "uno": 1,
+            "segundo": 2, "dos": 2,
+            "tercero": 3, "tercer": 3, "tres": 3,
+            "cuarto": 4, "cuatro": 4,
+            "quinto": 5, "cinco": 5,
+            "sexto": 6, "seis": 6,
+        }
+        num_pedida: Optional[int] = None
+        m_num = re.search(r"\b(?:ejercicio|problema|punto|actividad|pregunta|tema|inciso|el|la|numero|n)?\s*(\d{1,2})\b", q_norm)
+        if m_num:
+            num_pedida = int(m_num.group(1))
+        else:
+            for pal, n_ord in ordinales.items():
+                if re.search(rf"\b{pal}\b", q_norm):
+                    num_pedida = n_ord
+                    break
+
+        if num_pedida is not None:
+            patron_item = re.compile(
+                rf"^\s*(?:ejercicio|problema|actividad|pregunta|punto|tema)?\s*{num_pedida}\s*[).:\-]|^\s*#+\s*.*?\b{num_pedida}\b",
+                re.IGNORECASE,
+            )
+            for idx, ln in enumerate(lineas):
+                if patron_item.search(ln):
+                    return "\n".join(lineas[idx : idx + 3])[:1400]
+            # Si las líneas enumeran ejercicios sin prefijo numérico claro
+            ejercicios_crudos = [
+                ln for ln in lineas
+                if len(ln) >= 6 and not ln.lower().startswith(("nombre:", "curso:", "fecha:", "guía", "guia"))
+            ]
+            if 1 <= num_pedida <= len(ejercicios_crudos):
+                return ejercicios_crudos[num_pedida - 1][:1400]
+
+        stopwords = {
+            "ayuda", "ayudame", "explica", "explicame", "resolver", "resuelve",
+            "como", "hago", "este", "esta", "archivo", "tarea", "ejercicio", "hola", "haru", "por", "favor",
+        }
+        kws = [w for w in re.findall(r"[a-z0-9ñ]+", q_norm) if len(w) >= 3 and w not in stopwords]
+        if kws:
+            mejor_idx = 0
+            mejor_score = 0
+            for idx, ln in enumerate(lineas):
+                ln_norm = _normalizar_ia(ln)
+                score = sum(1 for kw in kws if kw in ln_norm)
+                if score > mejor_score:
+                    mejor_score = score
+                    mejor_idx = idx
+            if mejor_score > 0:
+                return "\n".join(lineas[mejor_idx : mejor_idx + 3])[:1400]
+
+        return "\n".join(lineas[:8])[:1400]
+
     def responder_consulta_escolar(
         self,
         pregunta: str,
@@ -468,6 +681,10 @@ class MotorIAHaru:
         if not pregunta_limpia:
             self.ultima_fuente = "Local"
             return "¡Hola! Escribe o dime tu duda y la resolvemos juntos con calma."
+
+        bloqueo = self._verificar_restriccion_tematica(pregunta_limpia)
+        if bloqueo:
+            return bloqueo
 
         # Capa 1A: Calculadora aritmética segura (AST)
         respuesta_mate = resolver_pregunta_matematica(pregunta_limpia)
@@ -482,11 +699,16 @@ class MotorIAHaru:
                 self.ultima_fuente = "Conocimiento Escolar SQLite"
                 return resp_local
 
+        # Capa 1C: Hora, fecha, técnicas de estudio y guía cotidiana segura
+        resp_cotidiana = self._responder_vida_cotidiana_y_estudio(pregunta_limpia)
+        if resp_cotidiana:
+            return resp_cotidiana
+
         contexto_pensum = self._obtener_contexto_pensum(f"{tarea_actual} {pregunta_limpia}")
         if modo_charla_libre or not paso_actual:
             contexto = (
                 f"El niño de primaria ya está en modo descanso/charla libre tras terminar '{tarea_actual[:80]}'. "
-                "Puede preguntarte sobre tareas escolares, curiosidades, emociones o temas cotidianos apropiados para su edad. "
+                "Puede preguntarte sobre tareas escolares, organización del estudio, curiosidades o temas cotidianos sanos. "
             )
         else:
             contexto = (
@@ -496,7 +718,7 @@ class MotorIAHaru:
             )
         prompt = (
             f"{contexto_pensum}{contexto}Mensaje del niño de primaria: '{pregunta_limpia}'. "
-            f"Responde como Haru en español neutro/boliviano, en máximo 2 oraciones cortitas, cálidas y claras, sin usar asteriscos."
+            f"Responde como Haru en español claro, en 2 o 3 oraciones breves, prácticas y sin Markdown."
         )
 
         # Capa 2: Ollama local (si está activo en la PC)
@@ -513,13 +735,13 @@ class MotorIAHaru:
         self.ultima_fuente = "Andamiaje Local"
         if modo_charla_libre or not paso_actual:
             return (
-                "¡Qué interesante lo que me cuentas! Me encanta charlar contigo en este ratito tranquilo; "
-                "puedes preguntarme cuentas matemáticas, temas de ciencias, un chiste o elegir otra misión cuando gustes."
+                "¡Qué interesante lo que me cuentas! Podemos charlar sobre tus metas de estudio, "
+                "preguntarme la hora, resolver cuentas o elegir una nueva misión cuando gustes."
             )
         return (
-            f"¡Qué buena pregunta! Para avanzar sin distraernos en «{(tarea_actual or 'tu misión')[:60]}», "
+            f"¡Buena pregunta! Para avanzar en «{(tarea_actual or 'tu misión')[:60]}», "
             f"hagamos primero este pasito: {(paso_actual or 'leer con calma el ejercicio')[:120]}. "
-            f"¡Si quieres, también podemos pedir apoyo a tu profe o familia!"
+            f"Si quieres que resuelva una cuenta o lea un archivo de ejercicios, dímelo con gusto."
         )
 
     # =========================================================================
@@ -555,10 +777,246 @@ class MotorIAHaru:
     # =========================================================================
     # 3. DESCOMPONEDOR AUTOMÁTICO DE TAREAS Y EXTRACTOR MULTIMODAL DE DOCUMENTOS
     # =========================================================================
+    def _descomponer_local_concreto(self, tema: str, modulo: str) -> Tuple[List[str], List[str]]:
+        """Genera 4 micro-pasos verificables con ejercicios/datos reales sin frases de relleno."""
+        ops = self._analizar_operaciones_en_texto(tema)
+        t_norm = _normalizar_ia(tema)
+
+        if ops and (modulo == "Matemáticas" or len(ops) >= 1):
+            etq1, _res1, exp1 = ops[0]
+            if len(ops) >= 2:
+                etq2, _res2, exp2 = ops[1]
+                pasos = [
+                    f"Prepara tu cuaderno de cuadros y copia claramente la primera operación: {etq1}.",
+                    f"Resuelve paso a paso {etq1} alineando unidades y decenas en tu cuaderno.",
+                    f"Ahora copia y resuelve la segunda operación: {etq2}.",
+                    f"Revisa ambas respuestas ({etq1} y {etq2}) en voz alta antes de cerrar tu cuaderno.",
+                ]
+                pistas = [
+                    f"Deja buen espacio debajo de {etq1} para anotar lo que llevas o prestas.",
+                    exp1,
+                    exp2,
+                    "Vuelve a comprobar unidades y decenas para confirmar tus dos resultados.",
+                ]
+            else:
+                pasos = [
+                    f"Abre tu cuaderno de matemáticas y escribe la operación {etq1}.",
+                    f"Identifica qué operación pide ({etq1}) y resuelve primero las unidades.",
+                    f"Completa el cálculo final de {etq1} y escribe la respuesta con lápiz rojo o subrayada.",
+                    f"Crea un segundo ejemplo parecido a {etq1} y compruébalo con Haru.",
+                ]
+                pistas = [
+                    "Alinea cada número en su columna correcta.",
+                    exp1,
+                    "Si terminas este paso, Haru te preguntará cuánto te salió.",
+                    "Puedes escribir otro ejercicio parecido en tu cuaderno para practicar.",
+                ]
+            return pasos, pistas
+
+        if modulo == "Inglés":
+            m_pal = re.findall(r"\b(BLUE|RED|GREEN|YELLOW|ORANGE|CAT|DOG|BIRD|LION|ONE|TWO|THREE|FOUR|FIVE|APPLE|BOOK)\b", tema.upper())
+            pal1 = m_pal[0] if m_pal else "BLUE"
+            pal2 = m_pal[1] if len(m_pal) > 1 else "CAT"
+            pal3 = m_pal[2] if len(m_pal) > 2 else "ONE, TWO, THREE"
+            pasos = [
+                f"¡Hello! Saca tu cuaderno de inglés y escribe el título «{tema[:42]}».",
+                f"Dibuja un ejemplo de {pal1}, escribe {pal1} con letra grande y pronúncialo 3 veces en voz alta.",
+                f"Ahora escribe y pronuncia la palabra {pal2} haciendo un pequeño dibujo al lado.",
+                f"¡You are a champion! Repasa en voz alta {pal1}, {pal2} y {pal3} antes de guardar tus útiles.",
+            ]
+            pistas = [
+                "Ten en tu mesa solo tu cuaderno de inglés y colores.",
+                f"Repite despacio en voz alta: {pal1}.",
+                f"Asocia el dibujo con su palabra en inglés ({pal2}) para recordarlo fácil.",
+                f"Practica una vez más la pronunciación de {pal1} y {pal2}.",
+            ]
+            return pasos, pistas
+
+        if modulo == "Matemáticas":
+            if "fraccion" in t_norm:
+                ej1, ej2 = "1/2 (la mitad de un círculo)", "1/4 (un cuarto pintado)"
+                pasos = [
+                    f"Prepara tu cuaderno y regla para practicar «{tema[:42]}».",
+                    f"Dibuja un círculo dividido en 2 partes iguales y pinta {ej1}.",
+                    f"Dibuja un cuadrado dividido en 4 partes iguales y pinta {ej2}.",
+                    "Escribe debajo de cada dibujo qué número es el numerador (arriba) y el denominador (abajo).",
+                ]
+                pistas = [
+                    "Usa monedas o tapas si te ayuda a dibujar círculos ordenados.",
+                    "1/2 significa que partimos el entero en 2 y tomamos 1 parte.",
+                    "1/4 significa que partimos en 4 partes iguales y pintamos 1.",
+                    "Recuerda: el denominador abajo dice en cuántas partes se divide el entero.",
+                ]
+            elif "multiplica" in t_norm or "tabla" in t_norm:
+                pasos = [
+                    "Prepara tu cuaderno y escribe estas dos multiplicaciones: 3 × 4 y 6 × 5.",
+                    "Resuelve 3 × 4 sumando 3 grupos de 4 (4 + 4 + 4) y anota el resultado.",
+                    "Resuelve 6 × 5 contando de 5 en 5 seis veces y anota el resultado.",
+                    "Inventa una multiplicación más con tu número favorito y compruébala en tu cuaderno.",
+                ]
+                pistas = [
+                    "Deja dos cuadritos de espacio entre cada ejercicio.",
+                    "Contar grupos iguales hace la multiplicación mucho más fácil.",
+                    "Usa tus dedos para llevar la cuenta: 5, 10, 15, 20...",
+                    "Revisa que tus resultados de 3 × 4 y 6 × 5 estén claros.",
+                ]
+            elif "divi" in t_norm:
+                pasos = [
+                    "Prepara tu cuaderno y escribe las divisiones 12 ÷ 3 y 20 ÷ 4.",
+                    "Resuelve 12 ÷ 3 imaginando que repartes 12 dulces entre 3 amigos.",
+                    "Resuelve 20 ÷ 4 repartiendo 20 lápices en 4 grupos iguales.",
+                    "Comprueba tus respuestas multiplicando cada resultado por el divisor.",
+                ]
+                pistas = [
+                    "Dibuja 3 círculos en borrador si quieres repartir los 12 elementos.",
+                    "Cuenta cuántos quedaron dentro de cada grupo.",
+                    "Pregunta: ¿qué número por 4 nos da 20?",
+                    "Si 4 × 5 = 20, entonces 20 ÷ 4 = 5.",
+                ]
+            elif "resta" in t_norm:
+                pasos = [
+                    "Abre tu cuaderno en hoja limpia y escribe las restas 28 - 13 y 45 - 19.",
+                    "Calcula primero 28 - 13 restando unidades (8 - 3) y decenas (2 - 1).",
+                    "Ahora calcula 45 - 19 prestando 1 decena al 5 para restar 15 - 9.",
+                    "Revisa ambas restas sumando el resultado con el número que quitaste.",
+                ]
+                pistas = [
+                    "Alinea siempre las unidades a la derecha y decenas a la izquierda.",
+                    "8 menos 3 da 5, y 2 menos 1 da 1.",
+                    "Al pedir prestado a la decena, el 4 queda en 3 y el 5 sube a 15.",
+                    "Comprobar con una suma asegura que no hubo descuidos.",
+                ]
+            else:
+                pasos = [
+                    f"Abre tu cuaderno de matemáticas y escribe dos sumas de práctica para «{tema[:38]}»: 16 + 8 y 24 + 15.",
+                    "Resuelve 16 + 8 sumando primero 6 + 8 y llevando 1 a la decena.",
+                    "Resuelve 24 + 15 alineando las columnas de unidades (4 + 5) y decenas (2 + 1).",
+                    "Verifica con calma el resultado de 16 + 8 y 24 + 15 antes de guardar tu lápiz.",
+                ]
+                pistas = [
+                    "Mantén sobre la mesa solo cuaderno, lápiz y borrador.",
+                    "6 + 8 = 14: deja el 4 abajo y lleva 1 decena arriba.",
+                    "4 + 5 = 9 y 20 + 10 = 30.",
+                    "Lee tus dos resultados finales en voz alta.",
+                ]
+            return pasos, pistas
+
+        if modulo == "Lenguaje":
+            if "verbo" in t_norm:
+                pasos = [
+                    "Abre tu cuaderno de lenguaje y escribe el título «Los Verbos (Acciones)».",
+                    "Subraya o copia 3 palabras que indiquen acción: correr, leer y dibujar.",
+                    "Escribe 2 oraciones cortas usando esos verbos (ej. «El niño lee un cuento»).",
+                    "Lee tus oraciones en voz alta señalando con tu dedo el verbo de cada una.",
+                ]
+                pistas = [
+                    "Recuerda: el verbo siempre responde a «¿qué hace?».",
+                    "Piensa en cosas que haces todos los días en la escuela o en casa.",
+                    "Empieza cada oración con mayúscula y termina con punto.",
+                    "Pregúntate qué palabra muestra movimiento o acción.",
+                ]
+            elif "sustantivo" in t_norm:
+                pasos = [
+                    "Prepara tu cuaderno de lenguaje para practicar «Sustantivos».",
+                    "Escribe 2 sustantivos comunes de objetos a tu vista (ej. cuaderno, mesa).",
+                    "Escribe 2 sustantivos propios con mayúscula inicial (ej. Bolivia, Haru).",
+                    "Arma una oración que junte un sustantivo propio y uno común.",
+                ]
+                pistas = [
+                    "Los sustantivos nombran personas, animales, cosas o lugares.",
+                    "Mira a tu alrededor y nombra objetos escolares.",
+                    "Los nombres propios siempre empiezan con letra mayúscula.",
+                    "Ejemplo guía: «María guarda su cuaderno azul».",
+                ]
+            else:
+                pasos = [
+                    f"Prepara tu lectura sobre «{tema[:44]}» y apoya tu dedo bajo el título.",
+                    "Lee en voz alta el primer párrafo despacio haciendo pausa en cada punto.",
+                    "Subraya quién es el personaje principal y escribe 3 palabras clave del texto.",
+                    "Redacta una oración propia contando lo que ocurrió al final del fragmento.",
+                ]
+                pistas = [
+                    "Una regla bajo el renglón te ayuda a no perder la línea.",
+                    "Si hay una palabra difícil, divídela por sílabas con palmadas.",
+                    "Pregúntate: ¿de quién habla el texto y qué hace?",
+                    "Di primero tu oración en voz alta antes de escribirla.",
+                ]
+            return pasos, pistas
+
+        if modulo == "Ciencias":
+            if "agua" in t_norm:
+                pasos = [
+                    "Prepara tu cuaderno y tus colores azul, amarillo y celeste para «El Ciclo del Agua».",
+                    "Dibuja el sol arriba calentando un río abajo y escribe la palabra EVAPORACIÓN.",
+                    "Dibuja una nube arriba con flechas que suben y escribe la palabra CONDENSACIÓN.",
+                    "Dibuja gotas cayendo desde la nube hacia el río y escribe PRECIPITACIÓN.",
+                ]
+                pistas = [
+                    "El sol calienta el agua y la convierte en vapor invisible.",
+                    "Evaporación es cuando el agua sube como vapor.",
+                    "Condensación es cuando ese vapor forma las nubes en el cielo.",
+                    "Precipitación es cuando vuelve a caer como lluvia.",
+                ]
+            elif "solar" in t_norm or "planeta" in t_norm:
+                pasos = [
+                    "Abre tu cuaderno de ciencias y dibuja al centro un Sol grande y brillante.",
+                    "Dibuja las órbitas y los 4 primeros planetas: Mercurio, Venus, Tierra y Marte.",
+                    "Agrega los 4 planetas gigantes más lejanos: Júpiter, Saturno, Urano y Neptuno.",
+                    "Señala la Tierra con un círculo verde y escribe 1 dato de por qué permite la vida.",
+                ]
+                pistas = [
+                    "Usa color amarillo o naranja para el Sol.",
+                    "Recuerda: somos el tercer planeta desde el Sol.",
+                    "Saturno se reconoce muy fácil por sus anillos.",
+                    "La Tierra tiene agua líquida y oxígeno para vivir.",
+                ]
+            elif "fotosint" in t_norm or "planta" in t_norm:
+                pasos = [
+                    "Dibuja en tu cuaderno una plantita con raíces, tallo, hojas verdes y flor.",
+                    "Agrega flechas mostrando los 3 ingredientes que toma: luz del sol, agua y aire.",
+                    "Escribe la palabra FOTOSÍNTESIS junto a las hojas verdes.",
+                    "Anota abajo por qué las plantas nos ayudan a vivir (producen oxígeno).",
+                ]
+                pistas = [
+                    "Empieza dibujando la tierra y las raíces por abajo.",
+                    "Las raíces toman agua y las hojas captan la luz solar.",
+                    "Las hojas usan el color verde (clorofila) para fabricar alimento.",
+                    "Al respirar aire limpio agradecemos el oxígeno de las plantas.",
+                ]
+            else:
+                pasos = [
+                    f"Saca tu cuaderno de ciencias y escribe el título «{tema[:44]}».",
+                    "Anota con tus palabras qué fenómeno o ser vivo estudia este tema.",
+                    "Dibuja un esquema central con 3 partes señaladas usando flechas de colores.",
+                    "Escribe una conclusión de 1 oración sobre cómo cuidarlo en la vida diaria.",
+                ]
+                pistas = [
+                    "Prepara solo 3 lápices de color para no distraerte.",
+                    "Piensa: ¿qué cambia, qué necesita o cómo funciona?",
+                    "Coloca etiquetas cortas y claras en cada flecha.",
+                    "Relacionarlo con tu entorno ayuda a recordarlo mejor.",
+                ]
+            return pasos, pistas
+
+        # Hábitos y Orden
+        pasos = [
+            f"Despeja tu espacio de estudio y reúne únicamente lo necesario para «{tema[:40]}».",
+            "Separa los materiales por orden de uso (primero cuaderno/agenda, luego estuche).",
+            "Ejecuta la primera acción práctica de organización y guarda cada útil usado en su sitio.",
+            "Revisa tu escritorio o mochila lista y marca qué horario respetarás mañana.",
+        ]
+        pistas = [
+            "Si ves juguetes o pantallas cerca, guárdalos fuera de la mesa.",
+            "Un lugar fijo para cada lápiz y cuaderno evita buscar cosas tarde.",
+            "Haz una sola tarea de orden a la vez con música tranquila o calma.",
+            "¡Un espacio ordenado le da paz a tu mente para aprender!",
+        ]
+        return pasos, pistas
+
     def descomponer_tarea_ia(
         self, tema_tarea: str, modulo_forzado: Optional[str] = None
     ) -> Tuple[List[str], List[str]]:
-        tema = re.sub(r"\s+", " ", (tema_tarea or "")).strip()[:180] or "Actividad Escolar"
+        tema = re.sub(r"\s+", " ", (tema_tarea or "")).strip()[:280] or "Actividad Escolar"
         modulo = (
             self.db.normalizar_modulo(modulo_forzado)
             if (modulo_forzado and self.db and hasattr(self.db, "normalizar_modulo"))
@@ -573,10 +1031,11 @@ class MotorIAHaru:
         )
         prompt = (
             f"{contexto_pensum}Como especialista en psicopedagogía TDAH para niños de primaria en el módulo '{modulo}', "
-            f"divide la tarea '{tema}' en exactamente 4 micro-pasos secuenciales muy concretos y 4 pistas breves. "
+            f"divide la tarea '{tema}' en exactamente 4 micro-pasos secuenciales CONCRETOS y verificables y 4 pistas breves. "
+            f"REGLA DE CALIDAD: NO escribas pasos vacíos o genéricos como 'haz la primera parte' o 'completa la segunda parte'. "
+            f"Incluye ejercicios, operaciones, palabras clave o acciones exactas en el cuaderno extraídas del tema. "
             f"{instruccion_idioma}"
-            f"Responde ÚNICAMENTE con un objeto JSON válido con las claves 'pasos' (4 strings) "
-            f"y 'pistas' (4 strings)."
+            f"Responde ÚNICAMENTE con un objeto JSON válido con las claves 'pasos' (4 strings) y 'pistas' (4 strings)."
         )
 
         for proveedor in (self._llamar_ollama, self._llamar_gemini):
@@ -587,8 +1046,8 @@ class MotorIAHaru:
                     fin = respuesta.rfind("}")
                     if inicio != -1 and fin != -1:
                         datos = json.loads(respuesta[inicio:fin + 1])
-                        pasos = [_limpiar_respuesta_ia(str(x), max_chars=180) for x in datos.get("pasos", []) if str(x).strip()]
-                        pistas = [_limpiar_respuesta_ia(str(x), max_chars=180) for x in datos.get("pistas", []) if str(x).strip()]
+                        pasos = [_limpiar_respuesta_ia(str(x), max_chars=210) for x in datos.get("pasos", []) if str(x).strip()]
+                        pistas = [_limpiar_respuesta_ia(str(x), max_chars=210) for x in datos.get("pistas", []) if str(x).strip()]
                         if len(pasos) >= 2:
                             while len(pistas) < len(pasos):
                                 pistas.append("Avanza con calma un pedacito a la vez.")
@@ -597,108 +1056,90 @@ class MotorIAHaru:
                     pass
 
         self.ultima_fuente = "Plantilla Psicopedagógica Local"
-        if modulo == "Inglés":
-            pasos = [
-                f"¡Hello! Saca tu cuaderno de inglés y tus colores para practicar «{tema}».",
-                "Busca o dibuja el primer ejemplo en tu hoja y repite su nombre en inglés en voz alta: BLUE!",
-                "Escribe la palabra en inglés con letra grande y dibuja su significado al lado: CAT!",
-                "¡You are a champion! Cuenta One, Two, Three dando tres aplausos y guarda tu cuaderno.",
-            ]
-            pistas = [
-                "Solo necesitas tu cuaderno de inglés y estar cómodo en tu silla.",
-                "Decir la palabra en inglés en voz alta ayuda a recordarla mejor.",
-                "Usa un color distinto para las letras en inglés y otro para tu dibujo.",
-                "One es uno, Two es dos, Three es tres. ¡Lo hiciste genial!",
-            ]
-        elif modulo == "Matemáticas":
-            pasos = [
-                f"Prepara únicamente tu cuaderno de matemáticas, lápiz y borrador para «{tema}».",
-                "Copia el primer ejercicio dejando buen espacio entre cada número.",
-                "Resuelve la operación paso a paso revisando unidades y decenas.",
-                "Comprueba tu respuesta con Haru y marca tu avance con alegría.",
-            ]
-            pistas = [
-                "Despeja tu mesa para ver solo el cuaderno y el lápiz.",
-                "Alinea las columnas de números una debajo de otra.",
-                "Si tienes dudas con una cuenta, escríbela en la barra de Haru IA.",
-                "¡Muy bien! Revisar al final evita pequeños descuidos.",
-            ]
-        elif modulo == "Lenguaje":
-            pasos = [
-                f"Abre tu libro o cuaderno de lenguaje en el tema «{tema}».",
-                "Lee en voz alta el primer fragmento siguiendo las palabras con tu dedo.",
-                "Subraya con tu color favorito las 3 ideas o palabras clave.",
-                "Escribe una oración corta explicando con tus palabras lo aprendido.",
-            ]
-            pistas = [
-                "Acomódate en un sitio iluminado y tranquilo.",
-                "Si una palabra es larga, léela despacio por sílabas.",
-                "Busca de quién trata el texto y qué acción realiza.",
-                "Di primero la frase en voz alta antes de escribirla.",
-            ]
-        elif modulo == "Ciencias":
-            pasos = [
-                f"Saca tu cuaderno y 3 lápices de colores para trabajar «{tema}».",
-                "Observa las imágenes o el concepto principal del tema.",
-                "Dibuja un esquema central sencillo con flechas de colores.",
-                "Escribe el nombre de cada parte importante con letra clara.",
-            ]
-            pistas = [
-                "Usar pocos colores a la vez mantiene tu atención enfocada.",
-                "Mira primero los títulos y dibujos principales.",
-                "Un dibujo grande al centro ayuda a recordar mejor.",
-                "Revisa que cada flecha tenga su etiqueta corta.",
-            ]
-        else:
-            pasos = [
-                f"Prepara sobre tu mesa solo los materiales necesarios para «{tema}».",
-                f"Realiza la primera parte de «{tema}» con calma y orden.",
-                "Completa la segunda parte verificando que cada útil vuelva a su lugar.",
-                "Revisa tu espacio limpio y celebra tu constancia con Haru.",
-            ]
-            pistas = [
-                "Un escritorio despejado ayuda a tu cerebro a concentrarse.",
-                "Enfócate únicamente en empezar este primer pedacito.",
-                "¡Ya vas por la mitad! Respira profundo y sigue así.",
-                "Ordenar al final te convierte en un campeón organizado.",
-            ]
-        return pasos, pistas
+        return self._descomponer_local_concreto(tema, modulo)
 
     def responder_sobre_documento(
         self, documento_texto: str, pregunta: str = "", nombre_doc: str = "tu archivo"
     ) -> str:
-        """Explica el contenido de un documento escolar al niño o al docente de forma breve y clara."""
-        fragmento = re.sub(r"\s+", " ", (documento_texto or "")).strip()[:2200]
-        if not fragmento:
+        """Analiza el archivo del alumno y explica/resuelve paso a paso el ejercicio consultado."""
+        consulta = re.sub(r"\s+", " ", (pregunta or "")).strip()[:280]
+        if consulta:
+            bloqueo = self._verificar_restriccion_tematica(consulta)
+            if bloqueo:
+                return bloqueo
+
+        if not (documento_texto or "").strip():
             self.ultima_fuente = "Local"
             return f"Leí el archivo {nombre_doc}, pero parece no tener texto legible."
 
-        modulo = self.detectar_modulo_automatico(fragmento)
-        consulta = re.sub(r"\s+", " ", (pregunta or "")).strip()[:240]
+        foco_doc = self._extraer_bloque_ejercicio_documento(documento_texto, consulta) or documento_texto[:1400]
+        foco_compacto = re.sub(r"\s+", " ", foco_doc).strip()[:1600]
+        modulo = self.detectar_modulo_automatico(f"{foco_compacto} {consulta}")
+        calculos = self._analizar_operaciones_en_texto(foco_compacto)
+        resumen_calculos = "; ".join(f"{etq} = {res} ({exp})" for etq, res, exp in calculos[:3])
+
+        guia_calculos = (
+            f"\nCálculos exactos verificados del ejercicio (úsalos para no equivocarte): {resumen_calculos}."
+            if resumen_calculos
+            else ""
+        )
         if consulta:
             prompt = (
-                f"Documento escolar de {modulo} ('{nombre_doc}'): \"{fragmento}\".\n"
-                f"Pregunta del estudiante de primaria: '{consulta}'. "
-                f"Responde como Haru en 2 o 3 oraciones muy claras, tiernas y sin asteriscos."
+                f"Fragmento relevante del archivo escolar de {modulo} ('{nombre_doc}'):\n\"{foco_compacto}\".{guia_calculos}\n"
+                f"Petición exacta del niño de primaria: '{consulta}'. "
+                f"Ayúdalo de verdad a resolver o comprender exactamente ese ejercicio paso a paso en 2 a 4 oraciones claras, sin usar asteriscos ni Markdown."
             )
         else:
             prompt = (
-                f"Documento escolar de {modulo} ('{nombre_doc}'): \"{fragmento}\".\n"
-                f"Explícale al niño de primaria en 2 oraciones motivadoras de qué trata este material "
-                f"y cuál es el primer pasito para resolverlo, sin usar asteriscos."
+                f"Contenido del archivo escolar de {modulo} ('{nombre_doc}'):\n\"{foco_compacto}\".{guia_calculos}\n"
+                f"Explícale al niño de primaria qué ejercicios pide su archivo y cómo resolver el primer ejercicio paso a paso en 2 a 4 oraciones claras, sin Markdown."
             )
 
         for proveedor in (self._llamar_ollama, self._llamar_gemini):
             resp = proveedor(prompt)
             if resp:
-                return _limpiar_respuesta_ia(resp, max_chars=340)
+                return _limpiar_respuesta_ia(resp, max_chars=430)
 
-        self.ultima_fuente = "Analizador Local de Documentos"
-        oraciones = [s.strip() for s in re.split(r"(?<=[.!?])\s+", fragmento) if len(s.strip()) > 15]
-        idea_1 = oraciones[0][:140] if oraciones else fragmento[:140]
-        return (
-            f"¡Revisé tu guía «{nombre_doc}» del módulo de {modulo}! "
-            f"Trata principalmente sobre: {idea_1}. ¡Podemos resolverla paso a paso juntos!"
+        # Respaldo 100% local que SÍ resuelve y guía ejercicios reales del documento
+        if calculos:
+            self.ultima_fuente = "Tutor Local de Documentos + AST"
+            partes_exp = [exp for _etq, _res, exp in calculos[:2]]
+            return _limpiar_respuesta_ia(
+                f"Revisé «{nombre_doc}». {' '.join(partes_exp)} ¡Anota el procedimiento con calma en tu cuaderno!",
+                max_chars=430,
+            )
+
+        if self.db:
+            resp_conoc = self.db.buscar_conocimiento(f"{consulta} {foco_compacto[:220]}")
+            if resp_conoc:
+                self.ultima_fuente = "Tutor Local de Documentos + SQLite"
+                return _limpiar_respuesta_ia(
+                    f"Sobre tu archivo «{nombre_doc}»: {resp_conoc} Empieza copiando la idea clave en tu cuaderno.",
+                    max_chars=430,
+                )
+
+        self.ultima_fuente = "Tutor Local de Documentos"
+        oraciones = [s.strip() for s in re.split(r"(?<=[.!?\n])\s*", foco_doc) if len(s.strip()) > 8]
+        foco_1 = oraciones[0][:150] if oraciones else foco_compacto[:150]
+        if modulo == "Inglés":
+            pals_en = re.findall(r"\b(BLUE|RED|GREEN|YELLOW|CAT|DOG|ONE|TWO|THREE|FOUR|FIVE)\b", foco_compacto.upper())
+            trad = {"BLUE": "azul", "RED": "rojo", "GREEN": "verde", "YELLOW": "amarillo", "CAT": "gato", "DOG": "perro", "ONE": "1", "TWO": "2", "THREE": "3"}
+            pista_en = ", ".join(f"{p} = {trad[p]}" for p in pals_en[:3] if p in trad)
+            extra = f" Recuerda: {pista_en}." if pista_en else ""
+            return _limpiar_respuesta_ia(
+                f"En tu guía de Inglés «{nombre_doc}» el ejercicio dice: «{foco_1}».{extra} Escribe cada palabra en inglés y dilo en voz alta.",
+                max_chars=430,
+            )
+        if "?" in foco_compacto or any(w in _normalizar_ia(foco_compacto) for w in ("subraya", "explica", "escribe", "completa", "dibuja", "lee")):
+            return _limpiar_respuesta_ia(
+                f"Para resolver este punto de «{nombre_doc}» («{foco_1}»): identifica primero qué dato te pide (persona, acción o número), "
+                f"subraya las palabras clave en tu hoja y responde en una oración corta.",
+                max_chars=430,
+            )
+        return _limpiar_respuesta_ia(
+            f"Revisé «{nombre_doc}» ({modulo}). Para resolver «{foco_1}», separa primero los datos que te da el enunciado "
+            f"y escríbeme la pregunta o cuenta específica que quieras comprobar.",
+            max_chars=430,
         )
 
     def extraer_tareas_de_documento(

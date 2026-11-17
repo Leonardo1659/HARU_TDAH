@@ -103,6 +103,7 @@ class VentanaPrincipalHaru(ctk.CTk):
         self._leds_estado = [False, False, False]
         self._ventana_secundaria: Optional[ctk.CTkToplevel] = None
         self._panel_docente_activo: Optional[PanelDocente] = None
+        self._documento_adjunto_pendiente: Optional[object] = None
         self._construir_interfaz_tableta()
         self._cargar_catalogo_misiones(seleccionar_primera=True)
 
@@ -918,8 +919,31 @@ class VentanaPrincipalHaru(ctk.CTk):
             }
             self.voz.hablar(frases.get(clave_skin, f"¡Traje de {nombre} listo!"))
 
+    def _limpiar_adjunto_pendiente(self) -> None:
+        self._documento_adjunto_pendiente = None
+        if hasattr(self, "btn_adjuntar_ia") and self.btn_adjuntar_ia.winfo_exists():
+            self.btn_adjuntar_ia.configure(
+                fg_color=self.tema["btn_purple"],
+                hover_color=self.tema["btn_purple_hover"],
+                text="",
+                width=38,
+            )
+        if hasattr(self, "entry_ia") and self.entry_ia.winfo_exists():
+            self.entry_ia.configure(placeholder_text="Pregúntale a Haru IA...")
+
     def _enviar_pregunta_ia(self) -> None:
         pregunta = self.entry_ia.get().strip()[:360]
+        if self._documento_adjunto_pendiente is not None:
+            doc = self._documento_adjunto_pendiente
+            self.entry_ia.delete(0, "end")
+            self._limpiar_adjunto_pendiente()
+            self.motor.consultar_documento_async(
+                doc.texto_completo,
+                doc.nombre_archivo,
+                pregunta=pregunta,
+                consumir_estrella=True,
+            )
+            return
         if not pregunta:
             return
         self.entry_ia.delete(0, "end")
@@ -935,6 +959,8 @@ class VentanaPrincipalHaru(ctk.CTk):
             ],
         )
         if not ruta:
+            if self._documento_adjunto_pendiente is not None:
+                self._limpiar_adjunto_pendiente()
             return
         try:
             doc = cargar_archivo_estudio(ruta)
@@ -954,15 +980,33 @@ class VentanaPrincipalHaru(ctk.CTk):
             )
             return
 
-        pregunta = self.entry_ia.get().strip()[:240]
-        if pregunta:
-            self.entry_ia.delete(0, "end")
-        self.motor.consultar_documento_async(
-            doc.texto_completo,
-            doc.nombre_archivo,
-            pregunta=pregunta,
-            consumir_estrella=True,
+        if not getattr(doc, "exito", True):
+            msg = getattr(doc, "mensaje_error", "") or "No pude leer el texto de ese archivo."
+            self.lbl_pista.configure(
+                text=f"  {msg}",
+                image=icono_ctk("file_text", self.tema["btn_purple"], 16),
+            )
+            self.voz.hablar(msg)
+            return
+
+        self._documento_adjunto_pendiente = doc
+        self.btn_adjuntar_ia.configure(
+            fg_color=self.tema["btn_green"],
+            hover_color=self.tema["btn_green_hover"],
+            text="1",
+            width=46,
         )
+        self.entry_ia.configure(
+            placeholder_text=f"Archivo {doc.nombre_archivo[:18]}: escribe qué ejercicio necesitas y envía..."
+        )
+        self.lbl_pista.configure(
+            text=(
+                f"  Archivo adjunto: «{doc.nombre_archivo}». "
+                "Escribe qué ejercicio quieres que te explique y presiona Enviar (o envía directo)."
+            ),
+            image=icono_ctk("file_text", self.tema["btn_green"], 16),
+        )
+        self.entry_ia.focus_set()
 
     def _accion_hablar_microfono(self) -> None:
         self.voz.detener()
@@ -987,6 +1031,15 @@ class VentanaPrincipalHaru(ctk.CTk):
             self._accion_descanso()
         elif es_comando_corto and ("respirar" in low or "calma" in low):
             self._accion_respirar()
+        elif self._documento_adjunto_pendiente is not None:
+            doc = self._documento_adjunto_pendiente
+            self._limpiar_adjunto_pendiente()
+            self.motor.consultar_documento_async(
+                doc.texto_completo,
+                doc.nombre_archivo,
+                pregunta=texto,
+                consumir_estrella=True,
+            )
         else:
             self.motor.consultar_ia_async(texto)
 
@@ -1135,7 +1188,7 @@ class VentanaPrincipalHaru(ctk.CTk):
         if datos:
             self.voz.detener()
             self.motor.cargar_tarea(datos["nombre"], datos["pasos"], datos["pistas"])
-            self.karaoke.preparar_texto(
+            self.voz.hablar(
                 f"Misión lista: {datos['nombre']}. ¡Presiona Empezar Misión cuando quieras!"
             )
 
@@ -1229,7 +1282,10 @@ class VentanaPrincipalHaru(ctk.CTk):
         self.marco_input_ia.configure(fg_color=t["input_bg"], border_color=t["input_border"])
         self.entry_ia.configure(text_color=t["text_primary"])
         self.btn_enviar_ia.configure(fg_color=t["btn_stage_pill"], hover_color=t["btn_stage_pill_hover"])
-        self.btn_adjuntar_ia.configure(fg_color=t["btn_purple"], hover_color=t["btn_purple_hover"])
+        if self._documento_adjunto_pendiente is not None:
+            self.btn_adjuntar_ia.configure(fg_color=t["btn_green"], hover_color=t["btn_green_hover"])
+        else:
+            self.btn_adjuntar_ia.configure(fg_color=t["btn_purple"], hover_color=t["btn_purple_hover"])
 
         self.card_pista.configure(fg_color=t["hint_bg"], border_color=t["hint_border"])
         self.lbl_pista.configure(text_color=t["text_primary"])
@@ -1291,7 +1347,7 @@ class VentanaPrincipalHaru(ctk.CTk):
             elif tipo == "tts_inicio":
                 self.karaoke.preparar_texto(d.get("texto", ""), modo_voz=d.get("modo", "neuronal"))
                 self.escenario_haru.actualizar_habla(True, boca=0)
-                if self.motor.estado != MotorTDAH.ESTADO_COMPLETADA and self.escenario_haru.estado != EscenarioCentralHaru.ESTADO_RESPIRANDO:
+                if self.escenario_haru.estado != EscenarioCentralHaru.ESTADO_RESPIRANDO:
                     self.escenario_haru.actualizar_estado(EscenarioCentralHaru.ESTADO_HABLANDO, boca=0)
                 self.lbl_estado_haru.configure(
                     text="  Haru: Hablando contigo...",
@@ -1350,6 +1406,8 @@ class VentanaPrincipalHaru(ctk.CTk):
                     text=f"  Haru IA: {d.get('respuesta', '')}",
                     image=icono_ctk("sparkles", self.tema["btn_purple"], 16),
                 )
+                if not self.escenario_haru.hablando_activo and self.escenario_haru.estado == EscenarioCentralHaru.ESTADO_PENSANDO:
+                    self.escenario_haru.actualizar_estado(EscenarioCentralHaru.ESTADO_IDLE)
 
             elif tipo == "ia_pista_lista":
                 self.btn_enviar_ia.configure(state="normal")
@@ -1359,6 +1417,8 @@ class VentanaPrincipalHaru(ctk.CTk):
                     text=f"  {d.get('pista', '')}",
                     image=icono_ctk("wand", self.tema["btn_purple"], 16),
                 )
+                if not self.escenario_haru.hablando_activo and self.escenario_haru.estado == EscenarioCentralHaru.ESTADO_PENSANDO:
+                    self.escenario_haru.actualizar_estado(EscenarioCentralHaru.ESTADO_IDLE)
 
             elif tipo == "stt_inicio":
                 self.btn_hablar.configure(text="Escuchando...", fg_color="#dc2626")

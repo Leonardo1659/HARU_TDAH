@@ -310,6 +310,7 @@ class MotorTDAH:
             numero_paso=self.indice_paso + 1,
             nombre_tarea=self.tarea_actual,
             contexto_pasos=previos,
+            total_pasos=len(self.pasos_actuales),
         )
         self._reto_actual_cache = (self.tarea_actual, self.indice_paso, reto)
         return reto

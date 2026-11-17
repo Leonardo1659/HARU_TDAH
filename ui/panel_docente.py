@@ -929,14 +929,26 @@ class PanelDocente(ctk.CTkToplevel):
         if not lote_aprobado or not self.db:
             return
         total = self.db.guardar_lote_tareas(lote_aprobado)
-        mod_primero = self.db.normalizar_modulo(lote_aprobado[0].get("categoria", "Matemáticas"))
+        primera = lote_aprobado[0]
+        mod_primero = self.db.normalizar_modulo(primera.get("categoria", "Matemáticas"))
         self.seleccionar_modulo_curricular(mod_primero, cargar_primera=True)
+        if self.motor and primera.get("pasos"):
+            self.motor.cargar_tarea(
+                primera.get("nombre", "Misión del Documento"),
+                primera.get("pasos", []),
+                primera.get("pistas", []),
+            )
         if self.callback_recargar:
             self.callback_recargar()
         modulos_unicos = sorted({self.db.normalizar_modulo(x.get("categoria", "")) for x in lote_aprobado})
         self.notificar(
             f"¡{total} tareas agregadas automáticamente a: {', '.join(modulos_unicos)}!"
         )
+        if self.voz and total > 0:
+            self.voz.hablar(
+                f"¡Listo! Aprendí {total} tareas nuevas de tu documento. "
+                f"Dejé preparada la misión {primera.get('nombre', '')} con {len(primera.get('pasos', []))} pasos para empezar."
+            )
 
     def _guardar_mision(self, activar_en_haru: bool = False) -> None:
         self._sincronizar_borrador_desde_widgets()

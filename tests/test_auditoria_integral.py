@@ -762,6 +762,80 @@ class TestAuditoriaIntegralHaru(unittest.TestCase):
         finally:
             root.destroy()
 
+    def test_13_razonamiento_guardian_documentos_y_comprobacion_progresiva(self):
+        from core.comprobacion_activa import generar_reto_paso, validar_respuesta_reto
+
+        self.ia._ollama_check_ts = 9e12
+        self.ia._ollama_modelo_cache = None
+
+        # 1) Filtro Guardián Infantil bloquea temas no aptos o videojuegos comerciales
+        r_juego = self.ia.responder_consulta_escolar("¿Cómo mejorar en freefire y dar headshot?", "Matemáticas", "")
+        self.assertEqual(self.ia.ultima_fuente, "Filtro Guardián Infantil")
+        self.assertIn("estudio", r_juego.lower())
+
+        r_romance = self.ia.responder_consulta_escolar("¿Cómo puedo tener novia en el colegio?", "Lenguaje", "")
+        self.assertEqual(self.ia.ultima_fuente, "Filtro Guardián Infantil")
+        self.assertIn("primaria", r_romance.lower())
+
+        # 2) Consultas cotidianas útiles (hora actual y técnicas de estudio)
+        r_hora = self.ia.responder_consulta_escolar("Haru, ¿qué hora es?")
+        self.assertRegex(r_hora, r"\d{2}:\d{2}")
+
+        r_estudio = self.ia.responder_consulta_escolar("¿Cómo puedo mejorar en mis estudios y concentrarme?")
+        self.assertIn("10 minutos", r_estudio.lower())
+
+        # 3) Resolución real de ejercicio específico dentro de archivo del alumno
+        guia_alumno = (
+            "Práctica de Matemáticas\n"
+            "Ejercicio 1: Calcula 14 + 5 en tu cuaderno.\n"
+            "Ejercicio 2: Resuelve 24 + 18 alineando unidades y decenas.\n"
+        )
+        r_doc = self.ia.responder_sobre_documento(
+            guia_alumno,
+            pregunta="ayúdame con el ejercicio 2",
+            nombre_doc="practica.txt",
+        )
+        self.assertIn("42", r_doc)
+        self.assertIn("24 + 18", r_doc)
+
+        # 4) Descomposición concreta de tareas sin relleno genérico
+        pasos_frac, _pistas_frac = self.ia.descomponer_tarea_ia("Fracciones homogéneas")
+        self.assertEqual(len(pasos_frac), 4)
+        self.assertFalse(any("primera parte" in p.lower() for p in pasos_frac))
+
+        # 5) Comprobación activa sin botones triviales y con rechazo de confirmaciones vacías
+        reto_custom = generar_reto_paso("Dibuja un esquema sobre la fotosíntesis en tu cuaderno.", 3, "Ciencias", ["Saca tu cuaderno", "Lee sobre las plantas"], total_pasos=3)
+        self.assertFalse(any("completé el paso" in op.lower() for op in reto_custom["opciones"]))
+        for intento_vacio in ("completé el ejercicio", "sí", "listo", "hola", "asdfg", "ya terminé todo el paso"):
+            ok_v, _msg_v = validar_respuesta_reto(reto_custom, intento_vacio)
+            self.assertFalse(ok_v, f"Debió rechazar '{intento_vacio}'")
+
+        # En Paso 3 tras copiar 15 + 7, exige cálculo total del cuaderno (22)
+        reto_paso3 = generar_reto_paso(
+            "Suma primero las unidades y luego la decena en tu cuaderno.",
+            3,
+            "Matemáticas - Sumas Divertidas",
+            ["Saca tu cuaderno.", "Escribe la suma: 15 + 7."],
+            total_pasos=3,
+        )
+        self.assertEqual(reto_paso3["respuesta_principal"], "22")
+        self.assertTrue(validar_respuesta_reto(reto_paso3, "22")[0])
+        self.assertFalse(validar_respuesta_reto(reto_paso3, "completé el ejercicio")[0])
+
+        # 6) Lip-Sync: si TTS empieza mientras el avatar estaba en PENSANDO, prevalece el movimiento labial
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            escenario = EscenarioCentralHaru(root, tema=TEMAS["CALMA"])
+            escenario.actualizar_estado("PENSANDO")
+            escenario.actualizar_habla(True, boca=2)
+            accion_h, _oj, boca_h, *_ = escenario.resolver_pose_actual()
+            self.assertEqual(accion_h, "HABLANDO")
+            self.assertEqual(boca_h, 2)
+            escenario.detener_animacion()
+        finally:
+            root.destroy()
+
 
 if __name__ == "__main__":
     unittest.main()

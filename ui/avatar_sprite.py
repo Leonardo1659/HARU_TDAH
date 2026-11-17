@@ -593,14 +593,16 @@ class EscenarioCentralHaru(tk.Canvas):
             accion = self.ESTADO_RESPIRANDO
         elif self._reaccion_restante > 0 and self._reaccion_temporal:
             accion = self._reaccion_temporal
-        elif self.estado in (self.ESTADO_ESCUCHANDO, self.ESTADO_PENSANDO):
-            accion = self.estado
+        elif self.estado == self.ESTADO_ESCUCHANDO:
+            accion = self.ESTADO_ESCUCHANDO
+        elif self.hablando_activo:
+            accion = self.ESTADO_CELEBRANDO if self.estado == self.ESTADO_CELEBRANDO else self.ESTADO_HABLANDO
+        elif self.estado == self.ESTADO_PENSANDO:
+            accion = self.ESTADO_PENSANDO
         elif self.estado == self.ESTADO_CELEBRANDO:
             accion = self.ESTADO_CELEBRANDO
         elif self.estado == self.ESTADO_PAUSA:
             accion = self.ESTADO_PAUSA
-        elif self.hablando_activo or self.estado == self.ESTADO_HABLANDO:
-            accion = self.ESTADO_HABLANDO
         else:
             accion = self.ESTADO_IDLE
 
