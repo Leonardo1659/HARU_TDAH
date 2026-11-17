@@ -1163,6 +1163,43 @@ class RepositorioTDAH:
         """Fichas disponibles para canjear premios reales sin perder medallas/trajes históricos."""
         return max(0, self.obtener_estrellas() - self.obtener_estrellas_gastadas())
 
+    def consumir_estrellas_ayuda(
+        self, costo: int = 1, detalle: str = "Ayuda guiada en archivo escolar"
+    ) -> Tuple[bool, int]:
+        """Consume fichas disponibles por Súper Ayuda en archivo sin perder medallas/trajes."""
+        costo_limpio = max(1, int(costo))
+        with self._conectar() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT valor FROM perfil_progreso WHERE clave = 'estrellas_totales'")
+            r_tot = cursor.fetchone()
+            totales = int(r_tot["valor"]) if r_tot else 5
+
+            cursor.execute("SELECT valor FROM perfil_progreso WHERE clave = 'estrellas_gastadas'")
+            r_gas = cursor.fetchone()
+            gastadas = max(0, int(r_gas["valor"])) if r_gas else 0
+
+            disponibles = max(0, totales - gastadas)
+            if disponibles < costo_limpio:
+                return False, disponibles
+
+            nuevas_gastadas = gastadas + costo_limpio
+            nuevo_saldo = max(0, totales - nuevas_gastadas)
+            cursor.execute(
+                """
+                INSERT INTO perfil_progreso (clave, valor) VALUES ('estrellas_gastadas', ?)
+                ON CONFLICT(clave) DO UPDATE SET valor = excluded.valor
+                """,
+                (str(nuevas_gastadas),),
+            )
+            conn.commit()
+
+        self.registrar_evento_auditoria(
+            "AYUDA_ARCHIVO",
+            "ECONOMIA_FICHAS",
+            f"{detalle} (-{costo_limpio} pts, saldo disponible: {nuevo_saldo})",
+        )
+        return True, nuevo_saldo
+
     # --- TIENDA Y CANJE DE PREMIOS PACTADOS (ECONOMÍA DE FICHAS TDAH) ---
     def listar_recompensas_catalogo(self) -> List[Dict]:
         with self._conectar() as conn:

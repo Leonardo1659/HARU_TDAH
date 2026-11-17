@@ -484,12 +484,35 @@ class MotorTDAH:
         threading.Thread(target=_worker, daemon=True, name="HaruAIWorker").start()
 
     def consultar_documento_async(
-        self, texto_documento: str, nombre_documento: str, pregunta: str = ""
+        self,
+        texto_documento: str,
+        nombre_documento: str,
+        pregunta: str = "",
+        consumir_estrella: bool = True,
     ) -> None:
-        """Analiza un documento escolar en segundo plano y responde por voz e interfaz."""
+        """Analiza un documento escolar en segundo plano (consumiendo 1 estrella disponible) y responde por voz e interfaz."""
         self.registrar_actividad_estudiante()
         if self._ia_ocupada:
             return
+
+        estrella_consumida = False
+        saldo_restante = None
+        if consumir_estrella and self.db and hasattr(self.db, "consumir_estrellas_ayuda"):
+            ok, saldo_restante = self.db.consumir_estrellas_ayuda(
+                1, f"Ayuda escolar en archivo '{nombre_documento}'"
+            )
+            if not ok:
+                msg_sin_saldo = (
+                    "¡Para usar la Súper Ayuda de Archivo necesitas 1 estrella disponible! "
+                    "Avanza un pasito en tu misión (+1 punto) y te ayudo enseguida."
+                )
+                self._hablar(msg_sin_saldo)
+                if self.bus:
+                    self.bus.emitir("ia_respuesta", respuesta=msg_sin_saldo)
+                self._notificar_ui()
+                return
+            estrella_consumida = True
+
         self._ia_ocupada = True
         if self.bus:
             self.bus.emitir("ia_pensando", mensaje=f"Leyendo el archivo {nombre_documento}...")
@@ -505,8 +528,13 @@ class MotorTDAH:
                 self._notificar_ui()
             finally:
                 self._ia_ocupada = False
+                respuesta_ui = (
+                    f"(-1 ⭐ Súper Ayuda • {saldo_restante} disp.) {respuesta}"
+                    if estrella_consumida
+                    else respuesta
+                )
                 if self.bus:
-                    self.bus.emitir("ia_respuesta", respuesta=respuesta)
+                    self.bus.emitir("ia_respuesta", respuesta=respuesta_ui)
 
         threading.Thread(target=_worker, daemon=True, name="HaruDocWorker").start()
 

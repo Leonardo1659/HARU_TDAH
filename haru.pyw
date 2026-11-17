@@ -8,11 +8,16 @@ activa nitidez High-DPI y registra el AppUserModelID en la barra de tareas de Wi
 """
 
 import ctypes
+import importlib
+import importlib.util
 import os
+import site
+import subprocess
 import sys
 import tkinter as tk
 import traceback
 from pathlib import Path
+from typing import Optional
 
 if getattr(sys, "frozen", False):
     ROOT_DIR = Path(sys.executable).resolve().parent
@@ -174,6 +179,71 @@ class _SplashCargaHaru:
             pass
 
 
+def _asegurar_dependencias_repositorio(splash: Optional[_SplashCargaHaru] = None) -> None:
+    """Si se ejecuta desde código fuente y falta alguna librería, instala `requirements.txt`."""
+    if getattr(sys, "frozen", False) or os.environ.get("HARU_PORTABLE_ROOT"):
+        return
+
+    req_path = ROOT_DIR / "requirements.txt"
+    if not req_path.exists():
+        return
+
+    modulos_req = (
+        "customtkinter",
+        "PIL",
+        "edge_tts",
+        "cv2",
+        "numpy",
+        "sounddevice",
+        "speech_recognition",
+        "serial",
+    )
+    if all(importlib.util.find_spec(mod) is not None for mod in modulos_req):
+        return
+
+    if splash is not None:
+        splash.avanzar(18, "Instalando librerías necesarias por primera vez...")
+
+    exe_py = Path(sys.executable)
+    if exe_py.name.lower() == "pythonw.exe" and exe_py.with_name("python.exe").exists():
+        py_cmd = str(exe_py.with_name("python.exe"))
+    else:
+        py_cmd = sys.executable
+
+    flags_win = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    cmd_base = [py_cmd, "-m", "pip", "install", "--disable-pip-version-check", "-r", str(req_path)]
+    try:
+        res = subprocess.run(
+            cmd_base,
+            cwd=str(ROOT_DIR),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=240,
+            creationflags=flags_win,
+        )
+        if res.returncode != 0:
+            subprocess.run(
+                [py_cmd, "-m", "pip", "install", "--user", "--disable-pip-version-check", "-r", str(req_path)],
+                cwd=str(ROOT_DIR),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=240,
+                creationflags=flags_win,
+            )
+    except Exception:
+        pass
+
+    try:
+        user_site = site.getusersitepackages()
+        if user_site and os.path.isdir(user_site) and user_site not in sys.path:
+            site.addsitedir(user_site)
+    except Exception:
+        pass
+    importlib.invalidate_caches()
+
+
 def iniciar_haru(silenciar_audio: bool = False) -> None:
     _configurar_streams_seguros()
     _activar_nitidez_dpi_y_appid_windows()
@@ -182,6 +252,7 @@ def iniciar_haru(silenciar_audio: bool = False) -> None:
     splash = None
     try:
         splash = _SplashCargaHaru()
+        _asegurar_dependencias_repositorio(splash)
         splash.avanzar(25, "Verificando componentes gráficos y de audio...")
         import customtkinter  # noqa: F401
 

@@ -9,3 +9,7 @@ sounddevice>=0.4.6
 SpeechRecognition>=3.10.4
 pyserial>=3.5
 opencv-python>=4.9.0
+numpy>=1.26.0
+standard-aifc>=3.13.0; python_version >= '3.13'
+standard-chunk>=3.13.0; python_version >= '3.13'
+audioop-lts>=0.2.1; python_version >= '3.13'

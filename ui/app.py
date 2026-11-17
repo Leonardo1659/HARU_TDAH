@@ -13,10 +13,12 @@ Implementa fielmente el diseño unificado con:
 """
 
 import tkinter as tk
+from tkinter import filedialog
 from typing import Dict, List, Optional
 
 import customtkinter as ctk
 
+from core.archivos_estudio import ErrorArchivoEstudio, cargar_archivo_estudio
 from core.config import VOZ_POR_DEFECTO
 from core.eventos import BusEventosUI
 from core.herramientas_multimodales import GestorMultimodal
@@ -513,7 +515,7 @@ class VentanaPrincipalHaru(ctk.CTk):
         self.entry_ia = ctk.CTkEntry(
             self.marco_input_ia,
             placeholder_text="Pregúntale a Haru IA...",
-            width=235,
+            width=195,
             height=38,
             border_width=0,
             fg_color="transparent",
@@ -535,6 +537,19 @@ class VentanaPrincipalHaru(ctk.CTk):
             command=self._enviar_pregunta_ia,
         )
         self.btn_enviar_ia.pack(side="right", padx=(2, 6), pady=4)
+
+        self.btn_adjuntar_ia = ctk.CTkButton(
+            self.marco_input_ia,
+            text="",
+            image=icono_ctk("file_text", "#ffffff", 15),
+            width=38,
+            height=34,
+            corner_radius=16,
+            fg_color=self.tema["btn_purple"],
+            hover_color=self.tema["btn_purple_hover"],
+            command=self._adjuntar_archivo_estudio_nino,
+        )
+        self.btn_adjuntar_ia.pack(side="right", padx=(2, 2), pady=4)
 
         # Centro: Burbuja de Pista de Apoyo / Respuesta IA
         self.card_pista = ctk.CTkFrame(
@@ -910,6 +925,45 @@ class VentanaPrincipalHaru(ctk.CTk):
         self.entry_ia.delete(0, "end")
         self.motor.consultar_ia_async(pregunta)
 
+    def _adjuntar_archivo_estudio_nino(self) -> None:
+        ruta = filedialog.askopenfilename(
+            parent=self,
+            title="Selecciona tu hoja o archivo de tarea (-1 estrella disponible)",
+            filetypes=[
+                ("Archivos de tarea", "*.txt *.pdf *.docx *.csv *.md"),
+                ("Todos los archivos", "*.*"),
+            ],
+        )
+        if not ruta:
+            return
+        try:
+            doc = cargar_archivo_estudio(ruta)
+        except ErrorArchivoEstudio as exc:
+            msg = str(exc)
+            self.lbl_pista.configure(
+                text=f"  {msg}",
+                image=icono_ctk("file_text", self.tema["btn_purple"], 16),
+            )
+            self.voz.hablar(msg)
+            return
+        except Exception as exc:
+            msg = f"No pude abrir ese archivo de tarea ({exc})."
+            self.lbl_pista.configure(
+                text=f"  {msg}",
+                image=icono_ctk("file_text", self.tema["btn_purple"], 16),
+            )
+            return
+
+        pregunta = self.entry_ia.get().strip()[:240]
+        if pregunta:
+            self.entry_ia.delete(0, "end")
+        self.motor.consultar_documento_async(
+            doc.texto_completo,
+            doc.nombre_archivo,
+            pregunta=pregunta,
+            consumir_estrella=True,
+        )
+
     def _accion_hablar_microfono(self) -> None:
         self.voz.detener()
         self.stt.escuchar_en_hilo()
@@ -1175,6 +1229,7 @@ class VentanaPrincipalHaru(ctk.CTk):
         self.marco_input_ia.configure(fg_color=t["input_bg"], border_color=t["input_border"])
         self.entry_ia.configure(text_color=t["text_primary"])
         self.btn_enviar_ia.configure(fg_color=t["btn_stage_pill"], hover_color=t["btn_stage_pill_hover"])
+        self.btn_adjuntar_ia.configure(fg_color=t["btn_purple"], hover_color=t["btn_purple_hover"])
 
         self.card_pista.configure(fg_color=t["hint_bg"], border_color=t["hint_border"])
         self.lbl_pista.configure(text_color=t["text_primary"])
@@ -1275,6 +1330,7 @@ class VentanaPrincipalHaru(ctk.CTk):
 
             elif tipo == "ia_pensando":
                 self.btn_enviar_ia.configure(state="disabled")
+                self.btn_adjuntar_ia.configure(state="disabled")
                 self.btn_pista.configure(state="disabled", text="Pensando...")
                 self.lbl_pista.configure(
                     text=f"  {d.get('mensaje', 'Pensando...')}",
@@ -1288,6 +1344,7 @@ class VentanaPrincipalHaru(ctk.CTk):
 
             elif tipo == "ia_respuesta":
                 self.btn_enviar_ia.configure(state="normal")
+                self.btn_adjuntar_ia.configure(state="normal")
                 self.btn_pista.configure(state="normal", text="Pista Mágica")
                 self.lbl_pista.configure(
                     text=f"  Haru IA: {d.get('respuesta', '')}",
@@ -1296,6 +1353,7 @@ class VentanaPrincipalHaru(ctk.CTk):
 
             elif tipo == "ia_pista_lista":
                 self.btn_enviar_ia.configure(state="normal")
+                self.btn_adjuntar_ia.configure(state="normal")
                 self.btn_pista.configure(state="normal", text="Pista Mágica")
                 self.lbl_pista.configure(
                     text=f"  {d.get('pista', '')}",
@@ -1395,6 +1453,7 @@ class VentanaPrincipalHaru(ctk.CTk):
             snap["texto_paso"],
             snap["pista_paso"],
             snap["estrellas_totales"],
+            snap.get("estrellas_disponibles", snap["estrellas_totales"]),
             snap["estrellas_sesion"],
             snap["descansos_disponibles"],
             snap["reloj_pausado"],
