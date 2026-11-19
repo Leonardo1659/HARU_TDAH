@@ -7,6 +7,8 @@ Incluye pantalla de carga (Splash Screen) con barra de progreso e ícono oficial
 activa nitidez High-DPI y registra el AppUserModelID en la barra de tareas de Windows.
 """
 
+from __future__ import annotations
+
 import ctypes
 import importlib
 import importlib.util
@@ -222,14 +224,56 @@ def _ejecutar_pip_con_splash(
         time.sleep(0.2)
 
 
-def _asegurar_dependencias_repositorio(splash: Optional[_SplashCargaHaru] = None) -> None:
+PYTHON_MINIMO = (3, 10)
+
+
+def _verificar_version_python(version_info=None) -> tuple[bool, str]:
+    """Verifica que el intérprete Python sea 3.10 o superior antes de cargar dependencias."""
+    ver = tuple((version_info or sys.version_info)[:3])
+    if ver[:2] >= PYTHON_MINIMO:
+        return True, ""
+    ver_txt = ".".join(str(x) for x in ver)
+    min_txt = f"{PYTHON_MINIMO[0]}.{PYTHON_MINIMO[1]}"
+    return (
+        False,
+        f"Haru requiere Python {min_txt} o superior (se detectó Python {ver_txt}).\n\n"
+        f"Actualiza Python desde https://www.python.org/downloads/ o utiliza "
+        f"la versión portable Haru.exe que ya incluye Python.",
+    )
+
+
+def _asegurar_pip_disponible(py_cmd: str) -> bool:
+    """Comprueba que `pip` esté operativo e intenta habilitarlo con `ensurepip` si falta."""
+    flags_win = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    for cmd_check in (
+        [py_cmd, "-m", "pip", "--version"],
+        [py_cmd, "-m", "ensurepip", "--upgrade"],
+        [py_cmd, "-m", "pip", "--version"],
+    ):
+        try:
+            res = subprocess.run(
+                cmd_check,
+                cwd=str(ROOT_DIR),
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=60,
+                creationflags=flags_win,
+            )
+            if cmd_check[2] == "pip" and res.returncode == 0:
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _asegurar_dependencias_repositorio(splash: Optional[_SplashCargaHaru] = None) -> bool:
     """Si se ejecuta desde código fuente y falta alguna librería, instala `requirements.txt`."""
     if getattr(sys, "frozen", False) or os.environ.get("HARU_PORTABLE_ROOT"):
-        return
+        return True
 
     req_path = ROOT_DIR / "requirements.txt"
     if not req_path.exists():
-        return
+        return True
 
     modulos_req = (
         "customtkinter",
@@ -242,16 +286,27 @@ def _asegurar_dependencias_repositorio(splash: Optional[_SplashCargaHaru] = None
         "pypdf",
     )
     if all(importlib.util.find_spec(mod) is not None for mod in modulos_req):
-        return
-
-    if splash is not None:
-        splash.avanzar(16, "Descargando librerías necesarias (primera vez)...")
+        return True
 
     exe_py = Path(sys.executable)
     if exe_py.name.lower() == "pythonw.exe" and exe_py.with_name("python.exe").exists():
         py_cmd = str(exe_py.with_name("python.exe"))
     else:
         py_cmd = sys.executable
+
+    if not _asegurar_pip_disponible(py_cmd):
+        if splash is not None:
+            splash.cerrar()
+        _mostrar_error_amigable(
+            "Haru — Falta el gestor pip",
+            "Este equipo no tiene 'pip' habilitado para descargar librerías automáticamente.\n\n"
+            "Reinstala Python marcando la opción 'pip', o abre directamente "
+            "la versión portable Haru.exe que ya trae todo incluido.",
+        )
+        return False
+
+    if splash is not None:
+        splash.avanzar(16, "Descargando librerías necesarias (primera vez)...")
 
     cmd_base = [py_cmd, "-m", "pip", "install", "--disable-pip-version-check", "-r", str(req_path)]
     rc = _ejecutar_pip_con_splash(cmd_base, splash, pct_inicio=16, pct_fin=44)
@@ -270,6 +325,7 @@ def _asegurar_dependencias_repositorio(splash: Optional[_SplashCargaHaru] = None
     except Exception:
         pass
     importlib.invalidate_caches()
+    return True
 
 
 def iniciar_haru(silenciar_audio: bool = False) -> None:
@@ -277,10 +333,16 @@ def iniciar_haru(silenciar_audio: bool = False) -> None:
     _activar_nitidez_dpi_y_appid_windows()
     _instalar_excepthook()
 
+    ok_py, msg_py = _verificar_version_python()
+    if not ok_py:
+        _mostrar_error_amigable("Haru — Versión de Python incompatible", msg_py)
+        return
+
     splash = None
     try:
         splash = _SplashCargaHaru()
-        _asegurar_dependencias_repositorio(splash)
+        if not _asegurar_dependencias_repositorio(splash):
+            return
         splash.avanzar(25, "Verificando componentes gráficos y de audio...")
         import customtkinter  # noqa: F401
 
