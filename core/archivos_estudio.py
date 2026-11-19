@@ -20,7 +20,7 @@ from xml.etree import ElementTree
 
 EXTENSIONES_ADMITIDAS = {".txt", ".md", ".csv", ".tsv", ".docx", ".pdf"}
 MAX_BYTES_ARCHIVO = 12 * 1024 * 1024  # 12 MB
-MAX_CARACTERES_CONTEXTO = 16000
+MAX_CARACTERES_CONTEXTO = 32000
 
 
 class ErrorArchivoEstudio(ValueError):
@@ -207,18 +207,55 @@ def _leer_tabla(archivo: Path, delimitador: str) -> str:
 
 
 def _leer_docx(archivo: Path) -> str:
-    """Lee párrafos y tablas de un archivo Word (.docx) sin dependencias externas."""
+    """Lee párrafos, tablas, tabulaciones y saltos de línea de un archivo Word (.docx) sin dependencias externas."""
     with zipfile.ZipFile(archivo, "r") as zf:
         xml_bytes = zf.read("word/document.xml")
     raiz = ElementTree.fromstring(xml_bytes)
     ns = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
-    parrafos: List[str] = []
-    for p in raiz.iter(f"{ns}p"):
-        fragmentos = [t.text for t in p.iter(f"{ns}t") if t.text]
-        linea = "".join(fragmentos).strip()
-        if linea:
-            parrafos.append(linea)
-    return "\n".join(parrafos)
+
+    def _texto_parrafo(p_elem) -> str:
+        partes: List[str] = []
+        for elem in p_elem.iter():
+            tag = elem.tag
+            if tag == f"{ns}t" and elem.text:
+                partes.append(elem.text)
+            elif tag == f"{ns}tab":
+                partes.append(" ")
+            elif tag in (f"{ns}br", f"{ns}cr"):
+                partes.append("\n")
+        return "".join(partes).strip()
+
+    lineas: List[str] = []
+    body = raiz.find(f"{ns}body")
+    if body is None:
+        for p in raiz.iter(f"{ns}p"):
+            t = _texto_parrafo(p)
+            if t:
+                lineas.append(t)
+        return "\n".join(lineas)
+
+    for hijo in body:
+        if hijo.tag == f"{ns}p":
+            t = _texto_parrafo(hijo)
+            if t:
+                lineas.append(t)
+        elif hijo.tag == f"{ns}tbl":
+            for tr in hijo.findall(f".//{ns}tr"):
+                celdas = []
+                for tc in tr.findall(f".//{ns}tc"):
+                    txt_celda = " ".join(
+                        t for p in tc.findall(f".//{ns}p") if (t := _texto_parrafo(p))
+                    ).strip()
+                    if txt_celda:
+                        celdas.append(txt_celda)
+                if celdas:
+                    lineas.append(" | ".join(celdas))
+        else:
+            for p in hijo.iter(f"{ns}p"):
+                t = _texto_parrafo(p)
+                if t:
+                    lineas.append(t)
+    return "\n".join(lineas)
 
 
 def _decodificar_literal_pdf(cadena_bytes: bytes) -> str:
@@ -256,12 +293,126 @@ def _decodificar_literal_pdf(cadena_bytes: bytes) -> str:
         return out.decode("latin-1", errors="ignore")
 
 
+def _extraer_cmap_tounicode(bloques_fuente: List[bytes]) -> dict[bytes, str]:
+    """Extrae mapas `ToUnicode` (`beginbfchar`/`beginbfrange`) para decodificar cadenas `<HEX>` en PDF."""
+    mapa: dict[bytes, str] = {}
+    for bloque in bloques_fuente:
+        if b"beginbfchar" not in bloque and b"beginbfrange" not in bloque:
+            continue
+        texto_cmap = bloque.decode("latin-1", errors="ignore")
+        for m_sec in re.finditer(r"beginbfchar\s*(.*?)\s*endbfchar", texto_cmap, re.DOTALL):
+            for src_hex, dst_hex in re.findall(r"<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]+)>", m_sec.group(1)):
+                try:
+                    src_b = bytes.fromhex(src_hex if len(src_hex) % 2 == 0 else "0" + src_hex)
+                    dst_b = bytes.fromhex(dst_hex if len(dst_hex) % 2 == 0 else "0" + dst_hex)
+                    mapa[src_b] = dst_b.decode("utf-16-be", errors="ignore") if len(dst_b) >= 2 else chr(dst_b[0])
+                except Exception:
+                    continue
+        for m_sec in re.finditer(r"beginbfrange\s*(.*?)\s*endbfrange", texto_cmap, re.DOTALL):
+            for start_h, end_h, dst_h in re.findall(
+                r"<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]+)>", m_sec.group(1)
+            ):
+                try:
+                    ancho = max(1, (len(start_h) + 1) // 2)
+                    ini = int(start_h, 16)
+                    fin = min(ini + 256, int(end_h, 16))
+                    dst_ini = int(dst_h, 16)
+                    for offset in range(fin - ini + 1):
+                        mapa[(ini + offset).to_bytes(ancho, "big")] = chr(dst_ini + offset)
+                except Exception:
+                    continue
+    return mapa
+
+
+def _decodificar_hex_pdf(hex_str: str, cmap: dict[bytes, str]) -> str:
+    limpio = re.sub(r"\s+", "", hex_str or "")
+    if not limpio:
+        return ""
+    if len(limpio) % 2 == 1:
+        limpio += "0"
+    try:
+        raw_b = bytes.fromhex(limpio)
+    except Exception:
+        return ""
+    if cmap:
+        pasos = 2 if any(len(k) == 2 for k in cmap) else 1
+        if pasos == 2 and len(raw_b) % 2 == 0:
+            chars = []
+            encontrados = 0
+            for i in range(0, len(raw_b), 2):
+                par = raw_b[i : i + 2]
+                if par in cmap:
+                    chars.append(cmap[par])
+                    encontrados += 1
+                else:
+                    chars.append(par.decode("latin-1", errors="ignore"))
+            if encontrados > 0:
+                return "".join(chars)
+        chars_1 = []
+        enc_1 = 0
+        for b in raw_b:
+            kb = bytes([b])
+            if kb in cmap:
+                chars_1.append(cmap[kb])
+                enc_1 += 1
+            else:
+                chars_1.append(chr(b))
+        if enc_1 > 0:
+            return "".join(chars_1)
+    if b"\x00" in raw_b and len(raw_b) % 2 == 0:
+        return raw_b.decode("utf-16-be", errors="ignore")
+    try:
+        return raw_b.decode("utf-8")
+    except UnicodeDecodeError:
+        return raw_b.decode("latin-1", errors="ignore")
+
+
+def _extraer_lineas_bt_pdf(contenido: str, cmap: dict[bytes, str]) -> List[str]:
+    """Reconstruye líneas lógicas dentro de bloques `BT ... ET` respetando `Tj`, `TJ`, `Td`, `TD`, `T*` y `Tm`."""
+    lineas: List[str] = []
+    patron_tokens = re.compile(
+        r"(\((?:\\.|[^\\()])*\)|<[0-9A-Fa-f\s]+>|\[(?:\\.|[^\[\]])*\]\s*TJ|-?\d+(?:\.\d+)?\s+-?\d+(?:\.\d+)?\s+T[dD]|T\*|\[(?:[^\]]+)\]\s*Tm|Tm|\bTj\b|\b'\b|\b\"\b)"
+    )
+    for bt in re.finditer(r"\bBT\b(.*?)\bET\b", contenido, re.DOTALL):
+        cuerpo = bt.group(1)
+        buf: List[str] = []
+        for tok in patron_tokens.finditer(cuerpo):
+            t = tok.group(0).strip()
+            if t.endswith("TJ"):
+                interior = t[1 : t.rfind("]")]
+                for sub in re.finditer(r"\((?:\\.|[^\\()])*\)|<[0-9A-Fa-f\s]+>|(-?\d+(?:\.\d+)?)", interior):
+                    seg = sub.group(0)
+                    if seg.startswith("("):
+                        buf.append(_decodificar_literal_pdf(seg[1:-1].encode("latin-1", errors="ignore")))
+                    elif seg.startswith("<"):
+                        buf.append(_decodificar_hex_pdf(seg[1:-1], cmap))
+                    else:
+                        try:
+                            if float(seg) <= -120:
+                                buf.append(" ")
+                        except ValueError:
+                            pass
+            elif t.startswith("("):
+                buf.append(_decodificar_literal_pdf(t[1:-1].encode("latin-1", errors="ignore")))
+            elif t.startswith("<"):
+                buf.append(_decodificar_hex_pdf(t[1:-1], cmap))
+            elif t.endswith(("Td", "TD", "T*", "Tm")):
+                linea = re.sub(r"\s+", " ", "".join(buf)).strip()
+                if linea:
+                    lineas.append(linea)
+                buf.clear()
+        linea_fin = re.sub(r"\s+", " ", "".join(buf)).strip()
+        if linea_fin:
+            lineas.append(linea_fin)
+    return lineas
+
+
 def _leer_pdf_optimizado(archivo: Path) -> str:
     """
     Extrae texto de archivos PDF:
-    1. Si `pypdf` está disponible en el entorno, lo utiliza para máxima cobertura.
-    2. Si no está disponible, utiliza descompresión nativa de flujos `stream` (`zlib`)
-       y decodificación de operadores `Tj` / `TJ` en Python estándar.
+    1. Si `pypdf` está disponible en el entorno, lo utiliza para máxima cobertura (Unicode/CMap).
+    2. Si no está disponible o falla, utiliza descompresión nativa `zlib`, decodificación
+       `ToUnicode` CMap + bloques `BT ... ET` (`Tj` / `TJ`) y literales PDF sin descartar líneas matemáticas.
     """
     try:
         import pypdf  # type: ignore
@@ -279,6 +430,11 @@ def _leer_pdf_optimizado(archivo: Path) -> str:
     except Exception:
         pass
 
+    return _leer_pdf_fallback_nativo(archivo)
+
+
+def _leer_pdf_fallback_nativo(archivo: Path) -> str:
+    """Extractor PDF puro Python sin dependencias externas, preservando ejercicios numéricos puros."""
     raw = archivo.read_bytes()
     bloques_fuente: List[bytes] = [raw]
     for match in re.finditer(rb"stream\r?\n(.*?)\r?\nendstream", raw, re.DOTALL):
@@ -290,15 +446,24 @@ def _leer_pdf_optimizado(archivo: Path) -> str:
             except Exception:
                 continue
 
+    cmap = _extraer_cmap_tounicode(bloques_fuente)
     lineas_extraidas: List[str] = []
+
     for bloque in bloques_fuente:
-        # Extraer literales entre paréntesis precedidos/seguidos de operadores PDF de texto
-        for m in re.finditer(rb"\((?:\\.|[^\\()])+\)", bloque):
-            interior = m.group(0)[1:-1]
-            txt = _decodificar_literal_pdf(interior).strip()
-            if len(txt) >= 2 and any(c.isalpha() for c in txt):
-                # Filtrar metadatos internos de fuentes PDF
-                if not txt.startswith(("Identity-H", "Adobe", "WinAnsiEncoding", "MacRoman")):
-                    lineas_extraidas.append(txt)
+        texto_b = bloque.decode("latin-1", errors="ignore")
+        if "BT" in texto_b and "ET" in texto_b:
+            for ln in _extraer_lineas_bt_pdf(texto_b, cmap):
+                if len(ln) >= 1 and any(c.isalnum() or c in "+-*/=×÷" for c in ln):
+                    if not ln.startswith(("Identity-H", "Adobe", "WinAnsiEncoding", "MacRoman")):
+                        lineas_extraidas.append(ln)
+
+    if not lineas_extraidas:
+        for bloque in bloques_fuente:
+            for m in re.finditer(rb"\((?:\\.|[^\\()])+\)", bloque):
+                interior = m.group(0)[1:-1]
+                txt = _decodificar_literal_pdf(interior).strip()
+                if len(txt) >= 1 and any(c.isalnum() or c in "+-*/=×÷" for c in txt):
+                    if not txt.startswith(("Identity-H", "Adobe", "WinAnsiEncoding", "MacRoman")):
+                        lineas_extraidas.append(txt)
 
     return "\n".join(lineas_extraidas)

@@ -160,7 +160,7 @@ SITE_PACKAGES_INCLUIR = [
     "PIL",
     "propcache",
     "pycparser",
-    "serial",
+    "pypdf",
     "sounddevice.py",
     "_sounddevice.py",
     "_sounddevice_data",
@@ -261,7 +261,7 @@ def compilar_haru_exe() -> Path:
 
     # 3. Copiar código y recursos de Haru dentro de _internal
     shutil.copy2(ROOT_DIR / "haru.pyw", INTERNAL_DIR / "haru.pyw")
-    for carpeta_app in ("core", "ui", "hardware"):
+    for carpeta_app in ("core", "ui"):
         _copiar_sin_pycache(ROOT_DIR / carpeta_app, INTERNAL_DIR / carpeta_app)
 
     _copiar_sin_pycache(

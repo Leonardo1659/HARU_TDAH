@@ -6,11 +6,13 @@ Diseñado con navegación lateral clara y distribución espaciosa en 4 módulos:
 1. Misiones y Pasos: Constructor visual tarjeta por tarjeta + Descomponedor IA.
 2. Progreso y Descansos: KPIs, gráfico visual de foco/pausas, bitácora y exportación CSV/HTML.
 3. Voz, Reloj e IA: Selector de voces neuronales (Bolivia/Latam), Pomodoro, Comprobación Activa, Modo Privado y Gemini.
-4. Seguridad y Arduino: Cambio de PIN cifrado (PBKDF2), control de placa Arduino UNO R3 y marco legal.
+4. Seguridad y Perfil: Cambio de PIN cifrado (PBKDF2), Perfil Pedagógico del Estudiante, Semáforo Visual y marco legal.
 """
 
 import os
+import queue
 import threading
+import time
 import tkinter as tk
 import webbrowser
 from tkinter import filedialog, messagebox
@@ -56,6 +58,13 @@ class PanelDocente(ctk.CTkToplevel):
         self._botones_modulo: Dict[str, ctk.CTkButton] = {}
         self._botones_nav: Dict[str, ctk.CTkButton] = {}
         self._status_toast_after = None
+        self._procesando_doc_activo: bool = False
+        self._progreso_doc_actual: float = 0.0
+        self._ultimo_pulso_doc_ts: float = 0.0
+        self._cola_progreso_doc: queue.SimpleQueue = queue.SimpleQueue()
+        self._after_progreso_doc_id = None
+        self._after_ocultar_progreso_id = None
+        self._after_ollama_poll_id = None
 
         self._recargar_cache_tareas()
         self._construir_estructura_principal()
@@ -136,7 +145,7 @@ class PanelDocente(ctk.CTkToplevel):
             ("misiones", "clipboard", "  1. Misiones y Pasos"),
             ("progreso", "chart", "  2. Progreso y Descansos"),
             ("voz_ia", "mic", "  3. Voz, Reloj e IA"),
-            ("seguridad", "shield", "  4. Seguridad y Arduino"),
+            ("seguridad", "shield", "  4. Seguridad y Perfil"),
         ]
         for clave, ico_nav, titulo in secciones:
             btn = ctk.CTkButton(
@@ -221,6 +230,25 @@ class PanelDocente(ctk.CTkToplevel):
             except Exception:
                 pass
             self._status_toast_after = None
+        if getattr(self, "_after_progreso_doc_id", None):
+            try:
+                self.after_cancel(self._after_progreso_doc_id)
+            except Exception:
+                pass
+            self._after_progreso_doc_id = None
+        if getattr(self, "_after_ocultar_progreso_id", None):
+            try:
+                self.after_cancel(self._after_ocultar_progreso_id)
+            except Exception:
+                pass
+            self._after_ocultar_progreso_id = None
+        if getattr(self, "_after_ollama_poll_id", None):
+            try:
+                self.after_cancel(self._after_ollama_poll_id)
+            except Exception:
+                pass
+            self._after_ollama_poll_id = None
+        self._procesando_doc_activo = False
         if self.callback_recargar:
             try:
                 self.callback_recargar()
@@ -253,6 +281,14 @@ class PanelDocente(ctk.CTkToplevel):
     # SECCIÓN 1: MISIONES ESCOLARES Y CONSTRUCTOR VISUAL DE MICRO-PASOS
     # =========================================================================
     MODULOS_CURRICULARES = ("Matemáticas", "Lenguaje", "Ciencias", "Inglés", "Hábitos y Orden")
+    GRADOS_PRIMARIA = (
+        "1.° de Primaria",
+        "2.° de Primaria",
+        "3.° de Primaria",
+        "4.° de Primaria",
+        "5.° de Primaria",
+        "6.° de Primaria",
+    )
 
     def _vista_misiones(self) -> None:
         marco = ctk.CTkFrame(self.contenedor, fg_color="transparent")
@@ -260,7 +296,8 @@ class PanelDocente(ctk.CTkToplevel):
         marco.grid_columnconfigure(0, weight=0, minsize=255)
         marco.grid_columnconfigure(1, weight=1)
         marco.grid_rowconfigure(0, weight=0)
-        marco.grid_rowconfigure(1, weight=1)
+        marco.grid_rowconfigure(1, weight=0)
+        marco.grid_rowconfigure(2, weight=1)
 
         # Barra Superior de 5 Módulos Curriculares + Progreso Visual + Subir Archivo/Pensum
         barra_modulos = ctk.CTkFrame(
@@ -301,6 +338,43 @@ class PanelDocente(ctk.CTkToplevel):
         )
         self.btn_subir_archivo.pack(side="right", padx=12, pady=6)
 
+        # Barra de carga visible para procesamiento de archivo / pensum
+        self.panel_progreso_doc = ctk.CTkFrame(
+            marco,
+            fg_color=self.tema["card_bg"],
+            border_color=self.tema["btn_purple"],
+            border_width=2,
+            corner_radius=14,
+        )
+        self.panel_progreso_doc.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(0, 10))
+        fila_prog_top = ctk.CTkFrame(self.panel_progreso_doc, fg_color="transparent")
+        fila_prog_top.pack(fill="x", padx=14, pady=(8, 2))
+        self.lbl_progreso_doc = ctk.CTkLabel(
+            fila_prog_top,
+            text="Procesando documento escolar...",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            text_color=self.tema["text_primary"],
+            anchor="w",
+        )
+        self.lbl_progreso_doc.pack(side="left", fill="x", expand=True)
+        self.lbl_progreso_doc_pct = ctk.CTkLabel(
+            fila_prog_top,
+            text="0%",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            text_color=self.tema["btn_green"],
+        )
+        self.lbl_progreso_doc_pct.pack(side="right")
+        self.barra_progreso_doc = ctk.CTkProgressBar(
+            self.panel_progreso_doc,
+            height=12,
+            corner_radius=6,
+            progress_color=self.tema["btn_green"],
+            fg_color=self.tema["card_inner"],
+        )
+        self.barra_progreso_doc.set(0.0)
+        self.barra_progreso_doc.pack(fill="x", padx=14, pady=(2, 10))
+        self.panel_progreso_doc.grid_remove()
+
         # Columna Izquierda: Lista de misiones disponibles
         col_izq = ctk.CTkFrame(
             marco,
@@ -309,7 +383,7 @@ class PanelDocente(ctk.CTkToplevel):
             border_width=2,
             corner_radius=20,
         )
-        col_izq.grid(row=1, column=0, sticky="nsew", padx=(0, 12))
+        col_izq.grid(row=2, column=0, sticky="nsew", padx=(0, 12))
 
         self.lbl_titulo_catalogo = ctk.CTkLabel(
             col_izq,
@@ -371,7 +445,7 @@ class PanelDocente(ctk.CTkToplevel):
             border_width=2,
             corner_radius=20,
         )
-        col_der.grid(row=1, column=1, sticky="nsew")
+        col_der.grid(row=2, column=1, sticky="nsew")
         col_der.grid_columnconfigure(0, weight=1)
         col_der.grid_rowconfigure(2, weight=1)
 
@@ -867,6 +941,136 @@ class PanelDocente(ctk.CTkToplevel):
 
         threading.Thread(target=_worker, daemon=True).start()
 
+    def _mostrar_progreso_documento(self, fraccion: float, mensaje: str) -> None:
+        val = max(0.0, min(1.0, float(fraccion)))
+        self._progreso_doc_actual = val
+        if not self.winfo_exists():
+            return
+        if hasattr(self, "panel_progreso_doc") and self.panel_progreso_doc.winfo_exists():
+            self.panel_progreso_doc.grid()
+        if hasattr(self, "barra_progreso_doc") and self.barra_progreso_doc.winfo_exists():
+            self.barra_progreso_doc.set(val)
+        if hasattr(self, "lbl_progreso_doc") and self.lbl_progreso_doc.winfo_exists():
+            self.lbl_progreso_doc.configure(text=mensaje)
+        if hasattr(self, "lbl_progreso_doc_pct") and self.lbl_progreso_doc_pct.winfo_exists():
+            self.lbl_progreso_doc_pct.configure(text=f"{int(round(val * 100))}%")
+
+    def _ocultar_progreso_documento(self) -> None:
+        if not self.winfo_exists():
+            return
+        if hasattr(self, "panel_progreso_doc") and self.panel_progreso_doc.winfo_exists():
+            self.panel_progreso_doc.grid_remove()
+        if hasattr(self, "btn_subir_archivo") and self.btn_subir_archivo.winfo_exists():
+            self.btn_subir_archivo.configure(state="normal", text="Subir Archivo / Pensum")
+
+    def _tick_pulso_progreso_doc(self) -> None:
+        if not self.winfo_exists():
+            self._after_progreso_doc_id = None
+            return
+
+        evento_final = None
+        while not self._cola_progreso_doc.empty():
+            try:
+                ev = self._cola_progreso_doc.get_nowait()
+            except queue.Empty:
+                break
+            tipo = ev[0]
+            if tipo == "progreso":
+                _, frac, msg = ev
+                self._ultimo_pulso_doc_ts = time.time()
+                self._mostrar_progreso_documento(frac, msg)
+            elif tipo == "fin":
+                evento_final = ev
+
+        if evento_final is not None:
+            self._after_progreso_doc_id = None
+            _, doc, tareas_propuestas, error_inesperado, abrir_modal, on_completado = evento_final
+            self._finalizar_procesamiento_doc(
+                doc,
+                tareas_propuestas,
+                error_inesperado,
+                abrir_modal,
+                on_completado,
+            )
+            return
+
+        if not self._procesando_doc_activo:
+            self._after_progreso_doc_id = None
+            return
+
+        ahora = time.time()
+        if (ahora - self._ultimo_pulso_doc_ts) >= 0.35 and self._progreso_doc_actual < 0.92:
+            self._ultimo_pulso_doc_ts = ahora
+            nuevo = min(0.92, self._progreso_doc_actual + 0.015)
+            msg_actual = "Procesando documento escolar..."
+            if hasattr(self, "lbl_progreso_doc") and self.lbl_progreso_doc.winfo_exists():
+                msg_actual = self.lbl_progreso_doc.cget("text")
+            self._mostrar_progreso_documento(nuevo, msg_actual)
+        self._after_progreso_doc_id = self.after(90, self._tick_pulso_progreso_doc)
+
+    def _reportar_progreso_doc_hilo(self, fraccion: float, mensaje: str) -> None:
+        """Encola actualizaciones de progreso desde el hilo secundario sin tocar widgets Tk."""
+        self._cola_progreso_doc.put(("progreso", fraccion, mensaje))
+
+    def _finalizar_procesamiento_doc(
+        self,
+        doc,
+        tareas_propuestas: List[Dict],
+        error_inesperado: str,
+        abrir_modal: bool,
+        on_completado: Optional[Callable[[List[Dict]], None]],
+    ) -> None:
+        self._procesando_doc_activo = False
+        if hasattr(self, "btn_subir_archivo") and self.btn_subir_archivo.winfo_exists():
+            self.btn_subir_archivo.configure(state="normal", text="Subir Archivo / Pensum")
+
+        if error_inesperado:
+            self._ocultar_progreso_documento()
+            if abrir_modal and self.winfo_exists():
+                messagebox.showwarning("Error al procesar archivo", error_inesperado, parent=self)
+            if on_completado:
+                on_completado([])
+            return
+
+        if not doc or not doc.exito:
+            self._ocultar_progreso_documento()
+            if abrir_modal and self.winfo_exists() and doc:
+                messagebox.showwarning("Archivo no legible", doc.mensaje_error, parent=self)
+            if on_completado:
+                on_completado([])
+            return
+
+        msg_fin = (
+            f"¡Listo! {len(tareas_propuestas)} tarea(s) listas para revisar."
+            if tareas_propuestas
+            else "No se detectaron tareas nuevas en el archivo."
+        )
+        self._mostrar_progreso_documento(1.0, msg_fin)
+
+        if tareas_propuestas:
+            mod_principal = tareas_propuestas[0].get("categoria", "Matemáticas")
+            self.seleccionar_modulo_curricular(mod_principal, cargar_primera=False)
+
+        if abrir_modal and tareas_propuestas and self.winfo_exists():
+            ModalAprobadorTareasDocumento(
+                self,
+                nombre_archivo=doc.nombre_archivo,
+                tareas_propuestas=tareas_propuestas,
+                tema=self.tema,
+                on_aprobar_lote=self._importar_lote_tareas_documento,
+            )
+        elif abrir_modal and not tareas_propuestas and self.winfo_exists():
+            messagebox.showinfo(
+                "Sin tareas detectadas",
+                "El documento se leyó, pero no se identificaron actividades escolares claras para importar.",
+                parent=self,
+            )
+
+        if self.winfo_exists():
+            self._after_ocultar_progreso_id = self.after(900, self._ocultar_progreso_documento)
+        if on_completado:
+            on_completado(tareas_propuestas)
+
     def _accion_subir_archivo_pensum(self) -> None:
         """Abre el selector de archivos escolares (.pdf, .docx, .txt, .md, .csv) para extraer pensum y tareas."""
         ruta = filedialog.askopenfilename(
@@ -881,7 +1085,75 @@ class PanelDocente(ctk.CTkToplevel):
         )
         if not ruta:
             return
-        self.procesar_archivo_pensum(ruta, abrir_modal=True)
+        self.procesar_archivo_pensum_async(ruta, abrir_modal=True)
+
+    def procesar_archivo_pensum_async(
+        self,
+        ruta_archivo: str,
+        abrir_modal: bool = True,
+        on_completado: Optional[Callable[[List[Dict]], None]] = None,
+    ) -> None:
+        """Procesa un documento escolar en segundo plano mostrando una barra de carga en vivo."""
+        if self._procesando_doc_activo:
+            self.notificar("Ya se está analizando un documento, espera un momento...")
+            return
+
+        if getattr(self, "_after_ocultar_progreso_id", None):
+            try:
+                self.after_cancel(self._after_ocultar_progreso_id)
+            except Exception:
+                pass
+            self._after_ocultar_progreso_id = None
+
+        while not self._cola_progreso_doc.empty():
+            try:
+                self._cola_progreso_doc.get_nowait()
+            except queue.Empty:
+                break
+
+        self._procesando_doc_activo = True
+        self._ultimo_pulso_doc_ts = time.time()
+        if hasattr(self, "btn_subir_archivo") and self.btn_subir_archivo.winfo_exists():
+            self.btn_subir_archivo.configure(state="disabled", text="Analizando...")
+
+        nombre_base = os.path.basename(ruta_archivo)
+        self._mostrar_progreso_documento(0.08, f"Leyendo archivo '{nombre_base}'...")
+        self._after_progreso_doc_id = self.after(90, self._tick_pulso_progreso_doc)
+
+        pref_mod = self.modulo_activo if self.modulo_activo in self.MODULOS_CURRICULARES else ""
+
+        def _worker():
+            doc = None
+            tareas_propuestas: List[Dict] = []
+            error_inesperado = ""
+            try:
+                doc = cargar_archivo_estudio(ruta_archivo)
+                if doc.exito:
+                    self._reportar_progreso_doc_hilo(
+                        0.18,
+                        f"Documento leído ({doc.nombre_archivo}). Detectando materias y pasos...",
+                    )
+                    if self.ia and hasattr(self.ia, "extraer_tareas_de_documento"):
+                        tareas_propuestas = self.ia.extraer_tareas_de_documento(
+                            doc,
+                            modulo_defecto=pref_mod,
+                            on_progreso=self._reportar_progreso_doc_hilo,
+                        )
+                    self._reportar_progreso_doc_hilo(0.92, "Guardando resumen curricular en base local...")
+                    if self.db and hasattr(self.db, "guardar_pensum_modulo"):
+                        modulos_doc = {t.get("categoria", "Matemáticas") for t in tareas_propuestas}
+                        if not modulos_doc and self.ia:
+                            modulos_doc = {self.ia.detectar_modulo_automatico(doc.texto_completo)}
+                        for mod_d in modulos_doc:
+                            self.db.guardar_pensum_modulo(mod_d, doc.nombre_archivo, doc.resumen_pensum)
+            except Exception as exc:
+                error_inesperado = str(exc)
+
+            self._cola_progreso_doc.put(
+                ("fin", doc, tareas_propuestas, error_inesperado, abrir_modal, on_completado)
+            )
+
+        threading.Thread(target=_worker, daemon=True).start()
 
     def procesar_archivo_pensum(self, ruta_archivo: str, abrir_modal: bool = True) -> List[Dict]:
         """
@@ -1526,7 +1798,91 @@ class PanelDocente(ctk.CTkToplevel):
             height=38,
             font=ctk.CTkFont(size=13, weight="bold"),
             command=_guardar_y_probar_voz,
-        ).pack(anchor="w", padx=18, pady=(10, 16))
+        ).pack(anchor="w", padx=18, pady=(10, 12))
+
+        # --- Subsección Ollama Local debajo de Voz Neuronal ---
+        ctk.CTkFrame(card_voz, height=2, fg_color=self.tema["card_border"]).pack(
+            fill="x", padx=18, pady=(4, 10)
+        )
+        self.panel_ollama = ctk.CTkFrame(
+            card_voz,
+            fg_color=self.tema["card_inner"],
+            corner_radius=14,
+        )
+        self.panel_ollama.pack(fill="both", expand=True, padx=18, pady=(0, 16))
+
+        ctk.CTkLabel(
+            self.panel_ollama,
+            text="  IA Local Privada (Ollama)",
+            image=icono_ctk("bolt", self.tema["text_primary"], 16),
+            compound="left",
+            font=ctk.CTkFont(size=14, weight="bold"),
+            text_color=self.tema["text_primary"],
+        ).pack(anchor="w", padx=14, pady=(12, 6))
+
+        fila_led = ctk.CTkFrame(self.panel_ollama, fg_color="transparent")
+        fila_led.pack(fill="x", padx=14, pady=2)
+        self.led_ollama = ctk.CTkFrame(
+            fila_led,
+            width=14,
+            height=14,
+            corner_radius=7,
+            fg_color="#64748b",
+            border_width=1,
+            border_color=self.tema["card_border"],
+        )
+        self.led_ollama.pack_propagate(False)
+        self.led_ollama.pack(side="left", padx=(0, 8))
+
+        self.lbl_ollama_estado = ctk.CTkLabel(
+            fila_led,
+            text="Sin verificar",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            text_color=self.tema["text_primary"],
+        )
+        self.lbl_ollama_estado.pack(side="left")
+
+        self.lbl_ollama_modelo = ctk.CTkLabel(
+            self.panel_ollama,
+            text="Modelo local: Ninguno detectado",
+            font=ctk.CTkFont(size=12),
+            text_color=self.tema["text_secondary"],
+            justify="left",
+            wraplength=330,
+        )
+        self.lbl_ollama_modelo.pack(anchor="w", padx=14, pady=(4, 8))
+
+        fila_ollama_ctrl = ctk.CTkFrame(self.panel_ollama, fg_color="transparent")
+        fila_ollama_ctrl.pack(fill="x", padx=14, pady=(0, 12))
+
+        self.combo_modelo_ollama = ctk.CTkOptionMenu(
+            fila_ollama_ctrl,
+            values=["Sin modelo local"],
+            width=185,
+            height=32,
+            corner_radius=10,
+            fg_color=self.tema["btn_stage_pill"],
+            button_color=self.tema["btn_stage_pill_hover"],
+            command=self._seleccionar_modelo_ollama,
+        )
+        self.combo_modelo_ollama.set("Sin modelo local")
+        self.combo_modelo_ollama.configure(state="disabled")
+        self.combo_modelo_ollama.pack(side="left", padx=(0, 8))
+
+        self.btn_refrescar_ollama = ctk.CTkButton(
+            fila_ollama_ctrl,
+            text="Verificar",
+            image=icono_ctk("refresh", "#ffffff", 14),
+            compound="left",
+            height=32,
+            width=108,
+            corner_radius=10,
+            fg_color=self.tema["btn_stage_pill"],
+            hover_color=self.tema["btn_stage_pill_hover"],
+            font=ctk.CTkFont(size=12, weight="bold"),
+            command=lambda: self._verificar_ollama_async(forzar=True),
+        )
+        self.btn_refrescar_ollama.pack(side="left")
 
         # --- Tarjeta 2: Temporizador Micro-Pomodoro y Comprobación Activa ---
         card_rel = ctk.CTkFrame(marco, fg_color=self.tema["card_bg"], border_color=self.tema["card_border"], border_width=2, corner_radius=20)
@@ -1560,20 +1916,14 @@ class PanelDocente(ctk.CTkToplevel):
         self.ent_max_desc.insert(0, str(self.motor.max_descansos_por_tarea))
         self.ent_max_desc.grid(row=2, column=1, padx=10, pady=4)
 
+        ctk.CTkLabel(grid_t, text="Aviso Inactividad (min):", text_color=self.tema["text_primary"]).grid(row=3, column=0, sticky="w", pady=4)
+        self.ent_inactividad = ctk.CTkEntry(grid_t, width=70, corner_radius=10)
+        self.ent_inactividad.insert(0, str(self.motor.umbral_inactividad_seg // 60))
+        self.ent_inactividad.grid(row=3, column=1, padx=10, pady=4)
+
         # Presets psicopedagógicos TDAH por edad escolar
         fila_presets = ctk.CTkFrame(card_rel, fg_color="transparent")
         fila_presets.pack(fill="x", padx=18, pady=(4, 2))
-
-        def _cargar_preset_pomodoro(mf: int, mp: int, md: int, etiqueta: str):
-            self.ent_foco.delete(0, "end")
-            self.ent_foco.insert(0, str(mf))
-            self.ent_pausa.delete(0, "end")
-            self.ent_pausa.insert(0, str(mp))
-            self.ent_max_desc.delete(0, "end")
-            self.ent_max_desc.insert(0, str(md))
-            self.sw_demo.deselect()
-            self.motor.configurar_tiempos_personalizados(mf, mp, md)
-            self.notificar(f"Perfil {etiqueta} guardado: {mf}m foco / {mp}m pausa ({md} descansos).")
 
         for txt_pr, mf_p, mp_p, md_p in (
             ("6–8 años (8m/2m)", 8, 2, 3),
@@ -1588,7 +1938,7 @@ class PanelDocente(ctk.CTkToplevel):
                 corner_radius=10,
                 height=28,
                 font=ctk.CTkFont(size=11, weight="bold"),
-                command=lambda a=mf_p, b=mp_p, c=md_p, t=txt_pr: _cargar_preset_pomodoro(a, b, c, t),
+                command=lambda a=mf_p, b=mp_p, c=md_p, t=txt_pr: self._cargar_preset_pomodoro(a, b, c, t),
             ).pack(side="left", padx=(0, 6), pady=2)
 
         self.sw_comprobacion = ctk.CTkSwitch(
@@ -1620,17 +1970,6 @@ class PanelDocente(ctk.CTkToplevel):
             self.sw_demo.select()
         self.sw_demo.pack(anchor="w", padx=18, pady=(2, 8))
 
-        def _aplicar_tiempos():
-            try:
-                mf = int(self.ent_foco.get())
-                mp = int(self.ent_pausa.get())
-                md = int(self.ent_max_desc.get())
-                self.sw_demo.deselect()
-                self.motor.configurar_tiempos_personalizados(mf, mp, md)
-                self.notificar(f"Tiempos aplicados: {mf}m foco / {mp}m pausa / {md} descansos.")
-            except ValueError:
-                messagebox.showwarning("Valor inválido", "Ingresa números enteros para minutos y descansos.", parent=self)
-
         ctk.CTkButton(
             card_rel,
             text="Aplicar Configuración de Reloj",
@@ -1639,7 +1978,7 @@ class PanelDocente(ctk.CTkToplevel):
             corner_radius=14,
             height=36,
             font=ctk.CTkFont(size=13, weight="bold"),
-            command=_aplicar_tiempos,
+            command=self._aplicar_tiempos,
         ).pack(anchor="w", padx=18, pady=(4, 16))
 
         # --- Tarjeta 3 (Ancho completo): IA en Capas y Privacidad Ley N.º 548 ---
@@ -1728,6 +2067,46 @@ class PanelDocente(ctk.CTkToplevel):
         )
         self.btn_probar_ia.pack(side="left", padx=6)
 
+        if self.ia and hasattr(self.ia, "obtener_info_ollama"):
+            try:
+                info_ollama = self.ia.obtener_info_ollama(forzar=False)
+                self._aplicar_estado_ollama_ui(info_ollama)
+            except Exception:
+                pass
+            if getattr(self.ia, "_ollama_check_ts", 0.0) == 0.0:
+                self._verificar_ollama_async(forzar=True)
+
+    def _cargar_preset_pomodoro(self, mf: int, mp: int, md: int, etiqueta: str = "Preset", mi: int = 3) -> None:
+        if hasattr(self, "ent_foco") and self.ent_foco.winfo_exists():
+            self.ent_foco.delete(0, "end")
+            self.ent_foco.insert(0, str(mf))
+        if hasattr(self, "ent_pausa") and self.ent_pausa.winfo_exists():
+            self.ent_pausa.delete(0, "end")
+            self.ent_pausa.insert(0, str(mp))
+        if hasattr(self, "ent_max_desc") and self.ent_max_desc.winfo_exists():
+            self.ent_max_desc.delete(0, "end")
+            self.ent_max_desc.insert(0, str(md))
+        if hasattr(self, "ent_inactividad") and self.ent_inactividad.winfo_exists():
+            self.ent_inactividad.delete(0, "end")
+            self.ent_inactividad.insert(0, str(mi))
+        if hasattr(self, "sw_demo") and self.sw_demo.winfo_exists():
+            self.sw_demo.deselect()
+        self.motor.configurar_tiempos_personalizados(mf, mp, md, min_inactividad=mi)
+        self.notificar(f"Perfil {etiqueta} guardado: {mf}m foco / {mp}m pausa ({md} descansos, aviso {mi}m).")
+
+    def _aplicar_tiempos(self) -> None:
+        try:
+            mf = int(self.ent_foco.get())
+            mp = int(self.ent_pausa.get())
+            md = int(self.ent_max_desc.get())
+            mi = int(self.ent_inactividad.get()) if hasattr(self, "ent_inactividad") else 3
+            if hasattr(self, "sw_demo") and self.sw_demo.winfo_exists():
+                self.sw_demo.deselect()
+            self.motor.configurar_tiempos_personalizados(mf, mp, md, min_inactividad=mi)
+            self.notificar(f"Tiempos aplicados: {mf}m foco / {mp}m pausa / {md} descansos (inactividad: {mi}m).")
+        except ValueError:
+            messagebox.showwarning("Valor inválido", "Ingresa números enteros para minutos y descansos.", parent=self)
+
     def _alternar_modo_privado(self) -> None:
         if not self.ia:
             return
@@ -1767,9 +2146,104 @@ class PanelDocente(ctk.CTkToplevel):
 
         threading.Thread(target=_worker, daemon=True).start()
 
+    def _aplicar_estado_ollama_ui(self, info: Dict[str, object]) -> None:
+        """Actualiza el LED visual y el modelo local detectado de Ollama de forma segura."""
+        if not self.winfo_exists():
+            return
+        conectado = bool(info and info.get("conectado"))
+        modelo_activo = str(info.get("modelo_activo") or "") if info else ""
+        modelos = [str(m) for m in (info.get("modelos_disponibles") or []) if str(m).strip()] if info else []
+
+        if conectado and modelo_activo:
+            if hasattr(self, "led_ollama") and self.led_ollama.winfo_exists():
+                self.led_ollama.configure(fg_color="#22c55e")
+            if hasattr(self, "lbl_ollama_estado") and self.lbl_ollama_estado.winfo_exists():
+                self.lbl_ollama_estado.configure(text="Conectado (IA Local Activa)", text_color="#22c55e")
+            if hasattr(self, "lbl_ollama_modelo") and self.lbl_ollama_modelo.winfo_exists():
+                self.lbl_ollama_modelo.configure(text=f"Modelo conectado: {modelo_activo}")
+            if hasattr(self, "combo_modelo_ollama") and self.combo_modelo_ollama.winfo_exists():
+                valores = modelos if modelos else [modelo_activo]
+                self.combo_modelo_ollama.configure(values=valores, state="normal")
+                self.combo_modelo_ollama.set(modelo_activo)
+        else:
+            if hasattr(self, "led_ollama") and self.led_ollama.winfo_exists():
+                self.led_ollama.configure(fg_color="#ef4444")
+            if hasattr(self, "lbl_ollama_estado") and self.lbl_ollama_estado.winfo_exists():
+                self.lbl_ollama_estado.configure(text="Desconectado", text_color=self.tema["text_secondary"])
+            if hasattr(self, "lbl_ollama_modelo") and self.lbl_ollama_modelo.winfo_exists():
+                self.lbl_ollama_modelo.configure(text="No se detectó Ollama local (127.0.0.1:11434).")
+            if hasattr(self, "combo_modelo_ollama") and self.combo_modelo_ollama.winfo_exists():
+                self.combo_modelo_ollama.configure(values=["Sin modelo local"], state="disabled")
+                self.combo_modelo_ollama.set("Sin modelo local")
+
+        if self.ia and hasattr(self, "lbl_estado_ia") and self.lbl_estado_ia.winfo_exists():
+            self.lbl_estado_ia.configure(text=self.ia.obtener_estado_ia())
+
+    def _seleccionar_modelo_ollama(self, modelo_elegido: str) -> None:
+        if not self.ia or not modelo_elegido or modelo_elegido == "Sin modelo local":
+            return
+        if hasattr(self.ia, "configurar_modelo_ollama"):
+            self.ia.configurar_modelo_ollama(modelo_elegido)
+        if hasattr(self, "lbl_ollama_modelo") and self.lbl_ollama_modelo.winfo_exists():
+            self.lbl_ollama_modelo.configure(text=f"Modelo conectado: {modelo_elegido}")
+        if hasattr(self, "lbl_estado_ia") and self.lbl_estado_ia.winfo_exists():
+            self.lbl_estado_ia.configure(text=self.ia.obtener_estado_ia())
+        self.notificar(f"Modelo Ollama seleccionado: {modelo_elegido}")
+
+    def _verificar_ollama_async(self, forzar: bool = True) -> None:
+        if not self.ia or not hasattr(self.ia, "obtener_info_ollama") or not self.winfo_exists():
+            return
+        if hasattr(self, "led_ollama") and self.led_ollama.winfo_exists():
+            self.led_ollama.configure(fg_color="#eab308")
+        if hasattr(self, "lbl_ollama_estado") and self.lbl_ollama_estado.winfo_exists():
+            self.lbl_ollama_estado.configure(text="Verificando Ollama...", text_color=self.tema["text_primary"])
+        if hasattr(self, "btn_refrescar_ollama") and self.btn_refrescar_ollama.winfo_exists():
+            self.btn_refrescar_ollama.configure(state="disabled")
+
+        cola_ollama: queue.SimpleQueue = queue.SimpleQueue()
+
+        def _worker():
+            info: Dict[str, object] = {"conectado": False, "modelo_activo": "", "modelos_disponibles": []}
+            try:
+                info = self.ia.obtener_info_ollama(forzar=forzar)
+            except Exception:
+                pass
+            cola_ollama.put(info)
+
+        def _revisar_cola():
+            if not self.winfo_exists():
+                self._after_ollama_poll_id = None
+                return
+            try:
+                info = cola_ollama.get_nowait()
+            except queue.Empty:
+                self._after_ollama_poll_id = self.after(80, _revisar_cola)
+                return
+            self._after_ollama_poll_id = None
+            if hasattr(self, "btn_refrescar_ollama") and self.btn_refrescar_ollama.winfo_exists():
+                self.btn_refrescar_ollama.configure(state="normal")
+            self._aplicar_estado_ollama_ui(info)
+
+        self._after_ollama_poll_id = self.after(80, _revisar_cola)
+        threading.Thread(target=_worker, daemon=True).start()
+
     # =========================================================================
-    # SECCIÓN 4: SEGURIDAD PIN, ARDUINO UNO R3 Y MARCO NORMATIVO
+    # SECCIÓN 4: SEGURIDAD PIN, PERFIL PEDAGÓGICO, SEMÁFORO VISUAL Y MARCO NORMATIVO
     # =========================================================================
+    def _guardar_perfil_estudiante(self) -> None:
+        if not hasattr(self, "ent_nombre_estudiante") or not hasattr(self, "combo_grado_primaria"):
+            return
+        nombre = self.ent_nombre_estudiante.get().strip()[:60]
+        grado = self.combo_grado_primaria.get().strip()
+        if grado not in self.GRADOS_PRIMARIA:
+            grado = "3.° de Primaria"
+        if self.db:
+            self.db.guardar_preferencia("nombre_estudiante", nombre)
+            self.db.guardar_preferencia("grado_primaria", grado)
+        if self.ia and hasattr(self.ia, "actualizar_perfil_estudiante"):
+            self.ia.actualizar_perfil_estudiante(nombre, grado)
+        self.notificar(f"Perfil pedagógico guardado: {nombre or 'Estudiante'} ({grado}).")
+
     def _vista_seguridad_arduino(self) -> None:
         marco = ctk.CTkScrollableFrame(self.contenedor, fg_color="transparent")
         marco.grid(row=0, column=0, sticky="nsew")
@@ -1826,85 +2300,104 @@ class PanelDocente(ctk.CTkToplevel):
         self.ent_pin_nuevo.bind("<Return>", lambda _e: _actualizar_pin())
         ctk.CTkButton(card_pin, text="Actualizar PIN Seguro", image=icono_ctk("check", "#ffffff", 15), compound="left", fg_color=self.tema["btn_green"], hover_color=self.tema["btn_green_hover"], corner_radius=14, height=38, font=ctk.CTkFont(size=13, weight="bold"), command=_actualizar_pin).pack(anchor="w", padx=18, pady=(8, 16))
 
-        # --- Tarjeta Hardware Arduino UNO R3 ---
+        # --- Tarjeta Perfil Pedagógico del Estudiante y Semáforo Visual ---
         card_hw = ctk.CTkFrame(marco, fg_color=self.tema["card_bg"], border_color=self.tema["card_border"], border_width=2, corner_radius=20)
         card_hw.grid(row=0, column=1, sticky="nsew", padx=(8, 0), pady=(0, 12))
 
         ctk.CTkLabel(
             card_hw,
-            text="  Semáforo Físico Arduino UNO R3",
-            image=icono_ctk("cpu", self.tema["text_primary"], 18),
+            text="  Perfil Pedagógico del Estudiante y Semáforo Visual",
+            image=icono_ctk("user", self.tema["text_primary"], 18),
             compound="left",
             font=ctk.CTkFont(size=16, weight="bold"),
             text_color=self.tema["text_primary"],
         ).pack(anchor="w", padx=18, pady=(16, 4))
 
-        en_sim = getattr(self.hardware, "en_simulacion", True)
-        puerto_txt = getattr(self.hardware, "puerto_actual", "Simulación Virtual")
         self.lbl_hw_estado = ctk.CTkLabel(
             card_hw,
-            text=f" {'Modo Simulación Activo' if en_sim else 'Placa Física Conectada'} ({puerto_txt})",
-            image=icono_ctk("dot", "#eab308" if en_sim else "#22c55e", 11),
+            text=" Guía Visual Nativa Activa • Adaptación de vocabulario por grado",
+            image=icono_ctk("dot", "#22c55e", 11),
             compound="left",
             font=ctk.CTkFont(size=12, weight="bold"),
             text_color=self.tema["text_secondary"],
         )
         self.lbl_hw_estado.pack(anchor="w", padx=18, pady=(0, 8))
 
-        puerto_pref = self.db.obtener_preferencia("puerto_arduino", "COM15") if self.db else "COM15"
-        puertos = (self.hardware.listar_puertos_disponibles() if self.hardware else []) or ["COM15", "COM3", "COM4", "COM5"]
-        if puerto_pref and puerto_pref not in puertos:
-            puertos = [puerto_pref] + list(puertos)
-        fila_p = ctk.CTkFrame(card_hw, fg_color="transparent")
-        fila_p.pack(fill="x", padx=18, pady=4)
+        nombre_est_actual = self.db.obtener_preferencia("nombre_estudiante", "") if self.db else ""
+        grado_est_actual = (
+            self.db.obtener_preferencia("grado_primaria", "3.° de Primaria")
+            if self.db
+            else "3.° de Primaria"
+        )
+        if grado_est_actual not in self.GRADOS_PRIMARIA:
+            grado_est_actual = "3.° de Primaria"
 
-        self.combo_com = ctk.CTkOptionMenu(fila_p, values=puertos, width=130, height=34, corner_radius=10, fg_color=self.tema["btn_stage_pill"])
-        self.combo_com.set(puerto_pref if puerto_pref in puertos else puertos[0])
-        self.combo_com.pack(side="left", padx=(0, 8))
+        form_perfil = ctk.CTkFrame(card_hw, fg_color="transparent")
+        form_perfil.pack(fill="x", padx=18, pady=4)
+        form_perfil.grid_columnconfigure(1, weight=1)
 
-        self.btn_reconectar_hw = ctk.CTkButton(
-            fila_p,
-            text="Conectar",
-            image=icono_ctk("refresh", "#ffffff", 14),
-            compound="left",
-            width=118,
+        ctk.CTkLabel(
+            form_perfil,
+            text="Nombre del Niño/a:",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            text_color=self.tema["text_primary"],
+        ).grid(row=0, column=0, sticky="w", padx=(0, 10), pady=4)
+
+        self.ent_nombre_estudiante = ctk.CTkEntry(
+            form_perfil,
+            placeholder_text="Ej. Mateo, Lucía...",
+            width=210,
             height=34,
             corner_radius=10,
-            fg_color=self.tema["btn_orange"],
-            hover_color=self.tema["btn_orange_hover"],
         )
+        if nombre_est_actual:
+            self.ent_nombre_estudiante.insert(0, nombre_est_actual)
+        self.ent_nombre_estudiante.grid(row=0, column=1, sticky="ew", pady=4)
+        self.ent_nombre_estudiante.bind("<Return>", lambda _e: self._guardar_perfil_estudiante())
 
-        def _reconectar():
-            if not self.hardware:
-                return
-            p = self.combo_com.get()
-            if self.db:
-                self.db.guardar_preferencia("puerto_arduino", p)
-            self.btn_reconectar_hw.configure(state="disabled", text="Buscando...")
+        ctk.CTkLabel(
+            form_perfil,
+            text="Grado de Primaria:",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            text_color=self.tema["text_primary"],
+        ).grid(row=1, column=0, sticky="w", padx=(0, 10), pady=4)
 
-            def _worker_hw():
-                ok = self.hardware.conectar(p)
-                self.after(
-                    0,
-                    lambda: (
-                        self.btn_reconectar_hw.configure(state="normal", text="Conectar"),
-                        self.lbl_hw_estado.configure(
-                            text=f" {'Conectado en ' + p if ok else 'Sin placa en ' + p + ' (Simulación)'}",
-                            image=icono_ctk("dot", "#22c55e" if ok else "#eab308", 11),
-                        ),
-                        self.notificar("Estado de Arduino actualizado."),
-                    )
-                    if self.winfo_exists()
-                    else None,
-                )
+        self.combo_grado_primaria = ctk.CTkOptionMenu(
+            form_perfil,
+            values=list(self.GRADOS_PRIMARIA),
+            width=210,
+            height=34,
+            corner_radius=10,
+            fg_color=self.tema["btn_stage_pill"],
+            button_color=self.tema["btn_stage_pill_hover"],
+        )
+        self.combo_grado_primaria.set(grado_est_actual)
+        self.combo_grado_primaria.grid(row=1, column=1, sticky="w", pady=4)
 
-            threading.Thread(target=_worker_hw, daemon=True, name="HaruArduinoProbe").start()
+        self.btn_guardar_perfil_estudiante = ctk.CTkButton(
+            card_hw,
+            text="Guardar Perfil del Estudiante",
+            image=icono_ctk("save", "#ffffff", 15),
+            compound="left",
+            height=36,
+            corner_radius=12,
+            fg_color=self.tema["btn_green"],
+            hover_color=self.tema["btn_green_hover"],
+            font=ctk.CTkFont(size=12, weight="bold"),
+            command=self._guardar_perfil_estudiante,
+        )
+        self.btn_guardar_perfil_estudiante.pack(anchor="w", padx=18, pady=(6, 8))
 
-        self.btn_reconectar_hw.configure(command=_reconectar)
-        self.btn_reconectar_hw.pack(side="left")
+        ctk.CTkLabel(
+            card_hw,
+            text="Prueba en vivo del Semáforo Visual (Inicio / Avance / Meta):",
+            font=ctk.CTkFont(size=11, weight="bold"),
+            text_color=self.tema["text_secondary"],
+        ).pack(anchor="w", padx=18, pady=(2, 2))
 
         fila_leds = ctk.CTkFrame(card_hw, fg_color="transparent")
-        fila_leds.pack(fill="x", padx=18, pady=(10, 16))
+        fila_leds.pack(fill="x", padx=18, pady=(4, 16))
+        self.botones_semaforo_visual: Dict[str, ctk.CTkButton] = {}
         if self.hardware:
             for txt, col_led, fn in [
                 ("Inicio", "#22c55e", lambda: self.hardware.actualizar_progreso(1, 3)),
@@ -1912,7 +2405,7 @@ class PanelDocente(ctk.CTkToplevel):
                 ("Meta", "#ef4444", lambda: self.hardware.celebrar_victoria()),
                 ("Apagar", "#94a3b8", lambda: self.hardware.apagar_todo()),
             ]:
-                ctk.CTkButton(
+                btn_sem = ctk.CTkButton(
                     fila_leds,
                     text=txt,
                     image=icono_ctk("dot", col_led, 10),
@@ -1923,7 +2416,9 @@ class PanelDocente(ctk.CTkToplevel):
                     fg_color=self.tema["btn_stage_pill"],
                     font=ctk.CTkFont(size=11, weight="bold"),
                     command=fn,
-                ).pack(side="left", padx=3)
+                )
+                btn_sem.pack(side="left", padx=3)
+                self.botones_semaforo_visual[txt] = btn_sem
 
         # --- Tarjeta Marco Legal Boliviano ---
         card_leg = ctk.CTkFrame(marco, fg_color=self.tema["card_bg"], border_color=self.tema["card_border"], border_width=2, corner_radius=20)

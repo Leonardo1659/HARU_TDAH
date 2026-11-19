@@ -42,7 +42,7 @@ flowchart TD
     subgraph Perifericos["Entornos de Entrada y Salida"]
         I["Voz Neuronal Local / Edge-TTS (Windows MCI)"]
         J["Reconocimiento de Voz Infantil (sounddevice + STT)"]
-        K["Semáforo de Escritorio Físico (Arduino UNO R3 / LEDs)"]
+        K["Semáforo Visual Pedagógico (core/semaforo_visual.py)"]
     end
 
     A --> E
@@ -135,6 +135,7 @@ HARU_TDAH/
 │   ├── eventos.py                # Bus asíncrono y reactivo de eventos de UI
 │   ├── motor_tdah.py             # Máquina de estados pedagógica, Pomodoro y retención de foco
 │   ├── repositorio_db.py         # Base Relacional SQLite WAL en 3FN (FKs, pasos_tarea y auditoria_eventos)
+│   ├── semaforo_visual.py        # Controlador nativo del Semáforo Visual Pedagógico (Inicio, Avance, Meta)
 │   ├── herramientas_multimodales.py # Síntesis de tonos y visión computacional
 │   ├── ia/                       # Clasificador automático de módulos, AST, Ollama y Gemini REST
 │   └── voz/                      # Síntesis TTS fonética y reconocimiento de voz STT
@@ -147,10 +148,8 @@ HARU_TDAH/
 │   ├── panel_docente.py          # Dashboard con 5 módulos, micrófono en vivo e ingesta de archivos
 │   ├── reto_colores_modal.py     # Componente sensorial con cámara web
 │   └── theme.py                  # Definición de paletas cromáticas (Calma, Día, Noche)
-├── hardware/                     # Controladores de periféricos externos
-│   └── control_leds.py           # Conexión serial con Arduino UNO R3 (o simulador)
-├── arduino/                      # Firmware para microcontroladores
-│   └── barra_progreso_tdah.ino   # Código C++ para semáforo físico de LEDs
+├── arduino/                      # Firmware opcional para microcontroladores
+│   └── barra_progreso_tdah.ino   # Código C++ de referencia para semáforo de LEDs
 ├── tests/                        # Batería de pruebas automatizadas
 │   ├── test_motor_tdah.py        # Pruebas del motor pedagógico y base de datos
 │   └── test_auditoria_integral.py# Pruebas integrales de seguridad, módulos, documentos y UI

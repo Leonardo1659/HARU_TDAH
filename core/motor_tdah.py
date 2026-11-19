@@ -87,8 +87,15 @@ class MotorTDAH:
         self.segundos_concentracion_sesion = 0
         self.pausas_activas_sesion = 0
         self.pausas_manuales_sesion = 0
-        self.max_descansos_por_tarea = (
-            int(self.db.obtener_preferencia("max_descansos_por_tarea", "2")) if self.db else 2
+        self.max_descansos_por_tarea = max(
+            0,
+            min(
+                10,
+                self._entero_seguro(
+                    self.db.obtener_preferencia("max_descansos_por_tarea", "2") if self.db else "2",
+                    2,
+                ),
+            ),
         )
         self.cooldown_descanso_seg = 10
         self.marcas_segundos_descanso: List[int] = []
@@ -108,10 +115,21 @@ class MotorTDAH:
 
         # Parámetros del Temporizador Micro-Pomodoro TDAH (10m foco / 2m pausa por defecto, persistentes)
         self.modo_demo = False
-        min_foco_cfg = int(self.db.obtener_preferencia("min_foco_pomodoro", "10")) if self.db else 10
-        min_pausa_cfg = int(self.db.obtener_preferencia("min_pausa_pomodoro", "2")) if self.db else 2
-        self.tiempo_foco = max(1, min_foco_cfg) * 60
-        self.tiempo_pausa = max(1, min_pausa_cfg) * 60
+        min_foco_cfg = self._entero_seguro(
+            self.db.obtener_preferencia("min_foco_pomodoro", "10") if self.db else "10",
+            10,
+        )
+        min_pausa_cfg = self._entero_seguro(
+            self.db.obtener_preferencia("min_pausa_pomodoro", "2") if self.db else "2",
+            2,
+        )
+        min_inact_cfg = self._entero_seguro(
+            self.db.obtener_preferencia("min_inactividad_nudge", "3") if self.db else "3",
+            3,
+        )
+        min_inactividad = max(0, min(30, min_inact_cfg))
+        self.tiempo_foco = max(1, min(60, min_foco_cfg)) * 60
+        self.tiempo_pausa = max(1, min(30, min_pausa_cfg)) * 60
 
         self.segundos_restantes = self.tiempo_foco
         self.temporizador_activo = False
@@ -120,8 +138,15 @@ class MotorTDAH:
         self._lock = threading.Lock()
         self._ia_ocupada = False
         self.ultimo_pulso_actividad = time.time()
-        self.umbral_inactividad_seg = 180
+        self.umbral_inactividad_seg = min_inactividad * 60
         self._nudge_emitido_en_paso = False
+
+    @staticmethod
+    def _entero_seguro(valor, defecto: int) -> int:
+        try:
+            return int(str(valor).strip())
+        except (ValueError, TypeError):
+            return defecto
 
     def registrar_actividad_estudiante(self) -> None:
         """Actualiza el pulso de actividad para el recordatorio amable de retención de foco."""
@@ -129,7 +154,7 @@ class MotorTDAH:
         self._nudge_emitido_en_paso = False
 
     def disparar_nudge_retencion(self) -> str:
-        """Emite un estímulo de reconexión cálido y no punitivo tras 180s de inactividad en un paso."""
+        """Emite un estímulo de reconexión cálido y no punitivo tras inactividad en un paso."""
         num_paso = self.indice_paso + 1
         msg = (
             f"¡Hola campeón! Seguimos juntos en el paso {num_paso}. "
@@ -149,27 +174,39 @@ class MotorTDAH:
             self.tiempo_foco = 25
             self.tiempo_pausa = 10
         else:
-            min_f = int(self.db.obtener_preferencia("min_foco_pomodoro", "10")) if self.db else 10
-            min_p = int(self.db.obtener_preferencia("min_pausa_pomodoro", "2")) if self.db else 2
-            self.tiempo_foco = max(1, min_f) * 60
-            self.tiempo_pausa = max(1, min_p) * 60
+            min_f = self._entero_seguro(
+                self.db.obtener_preferencia("min_foco_pomodoro", "10") if self.db else "10",
+                10,
+            )
+            min_p = self._entero_seguro(
+                self.db.obtener_preferencia("min_pausa_pomodoro", "2") if self.db else "2",
+                2,
+            )
+            self.tiempo_foco = max(1, min(60, min_f)) * 60
+            self.tiempo_pausa = max(1, min(30, min_p)) * 60
         self.segundos_restantes = self.tiempo_foco
         self._notificar_ui()
 
     def configurar_tiempos_personalizados(self, min_foco: int, min_pausa: int,
-                                          max_descansos: Optional[int] = None) -> None:
+                                          max_descansos: Optional[int] = None,
+                                          min_inactividad: Optional[int] = None) -> None:
         self.modo_demo = False
-        mf = max(1, min(60, int(min_foco)))
-        mp = max(1, min(30, int(min_pausa)))
+        mf = max(1, min(60, self._entero_seguro(min_foco, 10)))
+        mp = max(1, min(30, self._entero_seguro(min_pausa, 2)))
         self.tiempo_foco = mf * 60
         self.tiempo_pausa = mp * 60
         if self.db:
             self.db.guardar_preferencia("min_foco_pomodoro", str(mf))
             self.db.guardar_preferencia("min_pausa_pomodoro", str(mp))
         if max_descansos is not None:
-            self.max_descansos_por_tarea = max(0, min(10, int(max_descansos)))
+            self.max_descansos_por_tarea = max(0, min(10, self._entero_seguro(max_descansos, 2)))
             if self.db:
                 self.db.guardar_preferencia("max_descansos_por_tarea", str(self.max_descansos_por_tarea))
+        if min_inactividad is not None:
+            mi = max(0, min(30, self._entero_seguro(min_inactividad, 3)))
+            self.umbral_inactividad_seg = mi * 60
+            if self.db:
+                self.db.guardar_preferencia("min_inactividad_nudge", str(mi))
         self.segundos_restantes = self.tiempo_foco
         self._notificar_ui()
 
@@ -244,7 +281,10 @@ class MotorTDAH:
         self.reloj_en_pausa_manual = False
         self.registrar_actividad_estudiante()
         if self.db:
-            self.max_descansos_por_tarea = int(self.db.obtener_preferencia("max_descansos_por_tarea", "2"))
+            self.max_descansos_por_tarea = max(
+                0,
+                min(10, self._entero_seguro(self.db.obtener_preferencia("max_descansos_por_tarea", "2"), 2)),
+            )
             self.estrellas_totales = self.db.obtener_estrellas()
         self.iniciar_temporizador()
 
@@ -449,6 +489,8 @@ class MotorTDAH:
             else ""
         )
         if self.ia:
+            if hasattr(self.ia, "ultimo_cobro_documento"):
+                self.ia.ultimo_cobro_documento = None
             respuesta = self.ia.responder_consulta_escolar(
                 pregunta,
                 self.tarea_actual,
@@ -475,12 +517,19 @@ class MotorTDAH:
 
         def _worker():
             respuesta = "¡Aquí estoy contigo! Pregúntame de nuevo si necesitas ayuda."
+            respuesta_ui = respuesta
             try:
                 respuesta = self.consultar_ia(pregunta)
+                cobro = getattr(self.ia, "ultimo_cobro_documento", None) if self.ia else None
+                respuesta_ui = (
+                    f"(-{cobro['estrellas']} ⭐ Pack 3 ejercicios • {cobro['saldo_restante']} disp.) {respuesta}"
+                    if cobro
+                    else respuesta
+                )
             finally:
                 self._ia_ocupada = False
                 if self.bus:
-                    self.bus.emitir("ia_respuesta", respuesta=respuesta)
+                    self.bus.emitir("ia_respuesta", respuesta=respuesta_ui)
 
         threading.Thread(target=_worker, daemon=True, name="HaruAIWorker").start()
 
@@ -491,28 +540,10 @@ class MotorTDAH:
         pregunta: str = "",
         consumir_estrella: bool = True,
     ) -> None:
-        """Analiza un documento escolar en segundo plano (consumiendo 1 estrella disponible) y responde por voz e interfaz."""
+        """Analiza un documento escolar en segundo plano (1 estrella desbloquea 3 ejercicios únicos)."""
         self.registrar_actividad_estudiante()
         if self._ia_ocupada:
             return
-
-        estrella_consumida = False
-        saldo_restante = None
-        if consumir_estrella and self.db and hasattr(self.db, "consumir_estrellas_ayuda"):
-            ok, saldo_restante = self.db.consumir_estrellas_ayuda(
-                1, f"Ayuda escolar en archivo '{nombre_documento}'"
-            )
-            if not ok:
-                msg_sin_saldo = (
-                    "¡Para usar la Súper Ayuda de Archivo necesitas 1 estrella disponible! "
-                    "Avanza un pasito en tu misión (+1 punto) y te ayudo enseguida."
-                )
-                self._hablar(msg_sin_saldo)
-                if self.bus:
-                    self.bus.emitir("ia_respuesta", respuesta=msg_sin_saldo)
-                self._notificar_ui()
-                return
-            estrella_consumida = True
 
         self._ia_ocupada = True
         if self.bus:
@@ -520,24 +551,38 @@ class MotorTDAH:
 
         def _worker():
             respuesta = f"Revisé el archivo {nombre_documento}. ¡Hagámoslo paso a paso!"
+            cobro = None
             try:
                 if self.ia and hasattr(self.ia, "responder_sobre_documento"):
                     respuesta = self.ia.responder_sobre_documento(
-                        texto_documento, pregunta=pregunta, nombre_doc=nombre_documento
+                        texto_documento,
+                        pregunta=pregunta,
+                        nombre_doc=nombre_documento,
+                        cobrar_estrellas=consumir_estrella,
                     )
+                    cobro = getattr(self.ia, "ultimo_cobro_documento", None)
                 self._hablar(respuesta)
                 self._notificar_ui()
             finally:
                 self._ia_ocupada = False
                 respuesta_ui = (
-                    f"(-1 ⭐ Súper Ayuda • {saldo_restante} disp.) {respuesta}"
-                    if estrella_consumida
+                    f"(-{cobro['estrellas']} ⭐ Pack 3 ejercicios • {cobro['saldo_restante']} disp.) {respuesta}"
+                    if cobro
                     else respuesta
                 )
                 if self.bus:
                     self.bus.emitir("ia_respuesta", respuesta=respuesta_ui)
 
         threading.Thread(target=_worker, daemon=True, name="HaruDocWorker").start()
+
+    def obtener_info_documento_activo(self) -> Optional[Dict[str, object]]:
+        if self.ia and hasattr(self.ia, "obtener_documento_activo"):
+            return self.ia.obtener_documento_activo()
+        return None
+
+    def cerrar_documento_activo(self) -> None:
+        if self.ia and hasattr(self.ia, "cerrar_documento_activo"):
+            self.ia.cerrar_documento_activo()
 
     def calcular_intervalo_promedio_descanso(self) -> int:
         if not self.marcas_segundos_descanso:
@@ -701,6 +746,7 @@ class MotorTDAH:
                         self.segundos_concentracion_sesion += 1
                         if (
                             not self._nudge_emitido_en_paso
+                            and self.umbral_inactividad_seg > 0
                             and (time.time() - self.ultimo_pulso_actividad) >= self.umbral_inactividad_seg
                         ):
                             self.disparar_nudge_retencion()

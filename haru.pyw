@@ -14,6 +14,7 @@ import os
 import site
 import subprocess
 import sys
+import time
 import tkinter as tk
 import traceback
 from pathlib import Path
@@ -179,6 +180,48 @@ class _SplashCargaHaru:
             pass
 
 
+def _ejecutar_pip_con_splash(
+    cmd: list[str],
+    splash: Optional[_SplashCargaHaru],
+    pct_inicio: int = 16,
+    pct_fin: int = 46,
+    timeout_seg: float = 240.0,
+) -> int:
+    """Ejecuta `pip install` en segundo plano animando la barra de carga para no congelar el splash."""
+    flags_win = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            cwd=str(ROOT_DIR),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=flags_win,
+        )
+    except Exception:
+        return 1
+
+    inicio = time.monotonic()
+    pct_actual = pct_inicio
+    while True:
+        rc = proc.poll()
+        if rc is not None:
+            if splash is not None:
+                splash.avanzar(pct_fin, "Dependencias listas. Continuando inicio...")
+            return rc
+        transcurrido = time.monotonic() - inicio
+        if transcurrido >= timeout_seg:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+            return 1
+        if splash is not None:
+            progreso = min(pct_fin - 1, pct_inicio + int((pct_fin - pct_inicio) * min(0.95, transcurrido / 25.0)))
+            pct_actual = max(pct_actual, progreso)
+            splash.avanzar(pct_actual, "Descargando librerías necesarias (primera vez)...")
+        time.sleep(0.2)
+
+
 def _asegurar_dependencias_repositorio(splash: Optional[_SplashCargaHaru] = None) -> None:
     """Si se ejecuta desde código fuente y falta alguna librería, instala `requirements.txt`."""
     if getattr(sys, "frozen", False) or os.environ.get("HARU_PORTABLE_ROOT"):
@@ -196,13 +239,13 @@ def _asegurar_dependencias_repositorio(splash: Optional[_SplashCargaHaru] = None
         "numpy",
         "sounddevice",
         "speech_recognition",
-        "serial",
+        "pypdf",
     )
     if all(importlib.util.find_spec(mod) is not None for mod in modulos_req):
         return
 
     if splash is not None:
-        splash.avanzar(18, "Instalando librerías necesarias por primera vez...")
+        splash.avanzar(16, "Descargando librerías necesarias (primera vez)...")
 
     exe_py = Path(sys.executable)
     if exe_py.name.lower() == "pythonw.exe" and exe_py.with_name("python.exe").exists():
@@ -210,30 +253,15 @@ def _asegurar_dependencias_repositorio(splash: Optional[_SplashCargaHaru] = None
     else:
         py_cmd = sys.executable
 
-    flags_win = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     cmd_base = [py_cmd, "-m", "pip", "install", "--disable-pip-version-check", "-r", str(req_path)]
-    try:
-        res = subprocess.run(
-            cmd_base,
-            cwd=str(ROOT_DIR),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            timeout=240,
-            creationflags=flags_win,
+    rc = _ejecutar_pip_con_splash(cmd_base, splash, pct_inicio=16, pct_fin=44)
+    if rc != 0:
+        _ejecutar_pip_con_splash(
+            [py_cmd, "-m", "pip", "install", "--user", "--disable-pip-version-check", "-r", str(req_path)],
+            splash,
+            pct_inicio=30,
+            pct_fin=48,
         )
-        if res.returncode != 0:
-            subprocess.run(
-                [py_cmd, "-m", "pip", "install", "--user", "--disable-pip-version-check", "-r", str(req_path)],
-                cwd=str(ROOT_DIR),
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                timeout=240,
-                creationflags=flags_win,
-            )
-    except Exception:
-        pass
 
     try:
         user_site = site.getusersitepackages()

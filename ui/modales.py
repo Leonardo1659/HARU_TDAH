@@ -647,6 +647,7 @@ class ModalComprobacionPaso(ctk.CTkToplevel):
         self.on_activar_voz = on_activar_voz
         self._cerrado = False
         self._resuelto = False
+        self.intentos_fallidos = 0
 
         self.title(f"Comprobación Activa — Paso {numero_paso}")
         self.geometry("560x455")
@@ -839,13 +840,19 @@ class ModalComprobacionPaso(ctk.CTkToplevel):
     def evaluar_respuesta(self, respuesta: str) -> bool:
         if self._cerrado or self._resuelto:
             return False
-        correcta, mensaje = self.validador(respuesta)
+        proximo_intento = self.intentos_fallidos + 1
+        try:
+            correcta, mensaje = self.validador(respuesta, proximo_intento)
+        except TypeError:
+            correcta, mensaje = self.validador(respuesta)
         if correcta:
+            self.intentos_fallidos = 0
             self._resuelto = True
             self.lbl_feedback.configure(text=mensaje, text_color="#15803d")
             self._after_exito_id = self.after(260, self._finalizar_exito)
             return True
 
+        self.intentos_fallidos = proximo_intento
         self.lbl_feedback.configure(text=mensaje, text_color="#d97706")
         if self.on_hablar:
             self.on_hablar(mensaje)

@@ -21,10 +21,12 @@ import hashlib
 import hmac
 import html
 import json
+import math
 import os
 import re
 import secrets
 import sqlite3
+import threading
 import time
 import unicodedata
 from contextlib import contextmanager
@@ -88,28 +90,201 @@ class RepositorioTDAH:
     ]
 
     def __init__(self, db_path: Optional[str] = None):
-        if db_path:
-            os.makedirs(os.path.dirname(os.path.abspath(db_path)), exist_ok=True)
-            self.db_path = str(db_path)
+        self._lock = threading.RLock()
+        self._conn_memoria: Optional[sqlite3.Connection] = None
+        self._profundidad_memoria: int = 0
+        self._wal_configurado: bool = False
+
+        ruta_str = str(db_path).strip() if db_path is not None else ""
+        self._es_memoria = (
+            ruta_str == ":memory:"
+            or (ruta_str.startswith("file:") and "mode=memory" in ruta_str.lower())
+        )
+
+        if self._es_memoria:
+            self.db_path = ruta_str
+        elif ruta_str:
+            dir_padre = os.path.dirname(os.path.abspath(ruta_str))
+            if dir_padre:
+                os.makedirs(dir_padre, exist_ok=True)
+            self.db_path = ruta_str
         else:
             DB_PATH.parent.mkdir(parents=True, exist_ok=True)
             self.db_path = str(DB_PATH)
 
-        self._inicializar_tablas()
-        self._sembrar_datos_iniciales()
-        self._migrar_seguridad_pin()
+        self._ejecutar_con_reintento_lock(self._inicializar_tablas)
+        self._ejecutar_con_reintento_lock(self._sembrar_datos_iniciales)
+        self._ejecutar_con_reintento_lock(self._migrar_seguridad_pin)
+
+    @staticmethod
+    def _ejecutar_con_reintento_lock(operacion, max_intentos: int = 25):
+        ultimo_err: Optional[sqlite3.OperationalError] = None
+        for _ in range(max_intentos):
+            try:
+                return operacion()
+            except sqlite3.OperationalError as exc:
+                msg = str(exc).lower()
+                if "locked" not in msg and "busy" not in msg:
+                    raise
+                ultimo_err = exc
+                time.sleep(0.012 + secrets.randbelow(25) * 0.001)
+        if ultimo_err is not None:
+            raise ultimo_err
 
     @contextmanager
     def _conectar(self):
-        conn = sqlite3.connect(self.db_path, timeout=10.0)
-        conn.row_factory = sqlite3.Row
+        with self._lock:
+            use_uri = self.db_path.startswith("file:")
+            if self._es_memoria:
+                if self._conn_memoria is None:
+                    conn = sqlite3.connect(
+                        self.db_path,
+                        timeout=30.0,
+                        check_same_thread=False,
+                        isolation_level=None,
+                        uri=use_uri,
+                    )
+                    conn.row_factory = sqlite3.Row
+                    conn.execute("PRAGMA busy_timeout=10000")
+                    conn.execute("PRAGMA synchronous=NORMAL")
+                    conn.execute("PRAGMA foreign_keys=ON")
+                    self._conn_memoria = conn
+                conn = self._conn_memoria
+                self._profundidad_memoria += 1
+                try:
+                    yield conn
+                finally:
+                    self._profundidad_memoria = max(0, self._profundidad_memoria - 1)
+                    if self._profundidad_memoria == 0 and conn.in_transaction:
+                        try:
+                            conn.rollback()
+                        except sqlite3.Error:
+                            pass
+            else:
+                conn = sqlite3.connect(
+                    self.db_path,
+                    timeout=30.0,
+                    check_same_thread=False,
+                    isolation_level=None,
+                    uri=use_uri,
+                )
+                conn.row_factory = sqlite3.Row
+                try:
+                    conn.execute("PRAGMA busy_timeout=10000")
+                    if not self._wal_configurado:
+                        ultimo_err: Optional[sqlite3.OperationalError] = None
+                        for _ in range(30):
+                            try:
+                                row_jm = conn.execute("PRAGMA journal_mode").fetchone()
+                                modo_actual = str(row_jm[0]).lower() if row_jm else ""
+                                if modo_actual != "wal":
+                                    row_wal = conn.execute("PRAGMA journal_mode=WAL").fetchone()
+                                    modo_actual = str(row_wal[0]).lower() if row_wal else ""
+                                if modo_actual == "wal":
+                                    self._wal_configurado = True
+                                    break
+                            except sqlite3.OperationalError as exc:
+                                ultimo_err = exc
+                                msg = str(exc).lower()
+                                if "locked" not in msg and "busy" not in msg:
+                                    raise
+                            time.sleep(0.01 + secrets.randbelow(25) * 0.001)
+                        else:
+                            if not self._wal_configurado and ultimo_err is not None:
+                                raise ultimo_err
+                            self._wal_configurado = True
+                    conn.execute("PRAGMA synchronous=NORMAL")
+                    conn.execute("PRAGMA foreign_keys=ON")
+                    yield conn
+                finally:
+                    if conn.in_transaction:
+                        try:
+                            conn.rollback()
+                        except sqlite3.Error:
+                            pass
+                    conn.close()
+
+    @contextmanager
+    def _transaccion_inmediata(self):
+        with self._lock:
+            with self._conectar() as conn:
+                inicio_tx = False
+                if not conn.in_transaction:
+                    conn.execute("BEGIN IMMEDIATE")
+                    inicio_tx = True
+                try:
+                    yield conn
+                except Exception:
+                    if inicio_tx and conn.in_transaction:
+                        try:
+                            conn.rollback()
+                        except sqlite3.Error:
+                            pass
+                    raise
+                else:
+                    if inicio_tx and conn.in_transaction:
+                        conn.commit()
+
+    def cerrar(self) -> None:
+        """Cierra de forma segura la conexión compartida en memoria si existe."""
+        with self._lock:
+            if self._conn_memoria is not None:
+                try:
+                    if self._conn_memoria.in_transaction:
+                        self._conn_memoria.rollback()
+                except sqlite3.Error:
+                    pass
+                try:
+                    self._conn_memoria.close()
+                except sqlite3.Error:
+                    pass
+                finally:
+                    self._conn_memoria = None
+                    self._profundidad_memoria = 0
+
+    def __del__(self):
         try:
-            conn.execute("PRAGMA journal_mode=WAL")
-            conn.execute("PRAGMA synchronous=NORMAL")
-            conn.execute("PRAGMA foreign_keys=ON")
-            yield conn
-        finally:
-            conn.close()
+            self.cerrar()
+        except Exception:
+            pass
+
+    @staticmethod
+    def _parsear_int_seguro(
+        valor: Any,
+        defecto: int,
+        minimo: Optional[int] = None,
+        maximo: Optional[int] = None,
+    ) -> int:
+        if isinstance(valor, bool) or valor is None:
+            num = defecto
+        elif isinstance(valor, int):
+            num = valor
+        elif isinstance(valor, str):
+            txt = valor.strip()
+            if not txt:
+                num = defecto
+            else:
+                try:
+                    num = int(txt)
+                except ValueError:
+                    num = defecto
+        else:
+            num = defecto
+        if minimo is not None:
+            num = max(minimo, num)
+        if maximo is not None:
+            num = min(maximo, num)
+        return num
+
+    def obtener_preferencia_int(
+        self,
+        clave: str,
+        defecto: int = 0,
+        minimo: Optional[int] = None,
+        maximo: Optional[int] = None,
+    ) -> int:
+        raw = self.obtener_preferencia(clave, str(defecto))
+        return self._parsear_int_seguro(raw, defecto, minimo=minimo, maximo=maximo)
 
     def _obtener_o_crear_modulo_id(self, cursor: sqlite3.Cursor, categoria: str) -> int:
         mod_norm = self.normalizar_modulo(categoria)
@@ -149,7 +324,7 @@ class RepositorioTDAH:
             )
 
     def _inicializar_tablas(self):
-        with self._conectar() as conn:
+        with self._transaccion_inmediata() as conn:
             cursor = conn.cursor()
 
             # 1. Tabla Maestra de Módulos Curriculares (Entidad Fuerte)
@@ -291,7 +466,6 @@ class RepositorioTDAH:
             """)
 
             self._migrar_esquema_relacional_3fn(conn, cursor)
-            conn.commit()
 
     def _migrar_esquema_relacional_3fn(self, conn: sqlite3.Connection, cursor: sqlite3.Cursor) -> None:
         """
@@ -452,11 +626,12 @@ class RepositorioTDAH:
 
     def obtener_auditoria_eventos(self, limite: int = 50) -> List[Dict]:
         """Devuelve los eventos recientes de auditoría del sistema."""
+        lim = self._parsear_int_seguro(limite, 50, minimo=1)
         with self._conectar() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 "SELECT * FROM auditoria_eventos ORDER BY id DESC LIMIT ?",
-                (max(1, int(limite)),),
+                (lim,),
             )
             return [dict(r) for r in cursor.fetchall()]
 
@@ -592,9 +767,17 @@ class RepositorioTDAH:
             ("inglés", "Inglés", "¡En inglés podemos jugar con colores y animales! Por ejemplo: azul es BLUE, rojo es RED, gato es CAT, perro es DOG y contamos One, Two, Three."),
             ("colores en ingles", "Inglés", "Los colores básicos en inglés son: Azul = BLUE, Rojo = RED, Amarillo = YELLOW, Verde = GREEN. ¡Repítelos conmigo!"),
             ("numeros en ingles", "Inglés", "Del 1 al 5 en inglés se cuenta así: One (1), Two (2), Three (3), Four (4), Five (5). ¡You are a champion!"),
+            ("no estoy feliz", "Apoyo Emocional", "Está bien no sentirse feliz ahora mismo. Respira despacito conmigo y, si quieres, dividimos tu tarea en un pasito muy pequeño o tomamos un breve respiro."),
+            ("estoy triste", "Apoyo Emocional", "Siento mucho que te sientas triste hoy. Estoy aquí para acompañarte con calma; podemos respirar juntos o avanzar solo un pasito muy suave."),
+            ("estoy frustrado", "Apoyo Emocional", "Es normal sentir frustración cuando algo cuesta trabajo. Hagamos una pausa corta, inhala profundo tres veces y luego probamos juntos paso a paso."),
+            ("me fue mal", "Apoyo Emocional", "Un mal momento no borra todo lo que eres capaz de lograr. Respiremos con calma y revisemos juntos qué parte podemos mejorar poco a poco."),
+            ("soy tonto", "Apoyo Emocional", "No eres tonto para nada; tu mente solo necesita un poco más de tiempo y calma para aprenderlo. Vamos paso a paso, yo te acompaño."),
+            ("no me sale", "Apoyo Emocional", "Cuando algo no sale al primer intento, significa que estás practicando. Tomemos aire despacito y partamos este ejercicio en un paso pequeñito."),
+            ("no puedo", "Apoyo Emocional", "A veces todo junto parece muy grande, pero sí puedes avanzar poco a poco. Hagamos solo un pedacito pequeño juntos y sin apuro."),
+            ("no entiendo", "Apoyo Emocional", "No pasa nada si todavía no lo entiendes. Respira tranquilo y dime qué palabra o parte te confunde para explicártelo de forma más sencilla."),
         ]
 
-        with self._conectar() as conn:
+        with self._transaccion_inmediata() as conn:
             cursor = conn.cursor()
             ahora = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             cursor.execute("SELECT COUNT(*) as total FROM tareas")
@@ -616,6 +799,9 @@ class RepositorioTDAH:
                 "max_descansos_por_tarea": "2",
                 "min_foco_pomodoro": "10",
                 "min_pausa_pomodoro": "2",
+                "min_inactividad_nudge": "3",
+                "nombre_estudiante": "",
+                "grado_primaria": "",
                 "comprobacion_activa": "1",
                 "modo_privado": "0",
                 "voz_tts": "es-BO-SofiaNeural",
@@ -681,8 +867,6 @@ class RepositorioTDAH:
                         (tit0, costo0, desc0),
                     )
 
-            conn.commit()
-
     # --- SEGURIDAD PIN CON PBKDF2-HMAC-SHA256 Y BLOQUEO PERSISTENTE ---
     def _calcular_hash_pin(self, pin: str, salt_hex: str) -> str:
         dk = hashlib.pbkdf2_hmac(
@@ -695,51 +879,112 @@ class RepositorioTDAH:
 
     def _migrar_seguridad_pin(self):
         """Convierte cualquier PIN antiguo en texto plano a PBKDF2-HMAC-SHA256."""
-        pin_hash = self.obtener_preferencia("pin_hash", "")
-        pin_salt = self.obtener_preferencia("pin_salt", "")
-        pin_plano = self.obtener_preferencia("pin_docente", "")
+        with self._transaccion_inmediata() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT clave, valor FROM perfil_progreso WHERE clave IN ('pin_hash', 'pin_salt', 'pin_docente')"
+            )
+            prefs = {
+                row["clave"]: (row["valor"] if row["valor"] is not None else "")
+                for row in cursor.fetchall()
+            }
+            pin_hash = prefs.get("pin_hash", "")
+            pin_salt = prefs.get("pin_salt", "")
+            pin_plano = prefs.get("pin_docente", "")
 
-        if not pin_hash or not pin_salt:
-            semilla_pin = pin_plano.strip() if pin_plano.strip() else "1234"
-            nuevo_salt = secrets.token_hex(16)
-            nuevo_hash = self._calcular_hash_pin(semilla_pin, nuevo_salt)
-            self.guardar_preferencia("pin_salt", nuevo_salt)
-            self.guardar_preferencia("pin_hash", nuevo_hash)
-            if semilla_pin != "1234":
-                self.guardar_preferencia("pin_personalizado", "1")
+            salt_invalido = False
+            if pin_salt:
+                try:
+                    bytes.fromhex(pin_salt)
+                except ValueError:
+                    salt_invalido = True
 
-        if pin_plano:
-            with self._conectar() as conn:
-                conn.execute("DELETE FROM perfil_progreso WHERE clave = 'pin_docente'")
-                conn.commit()
+            if not pin_hash or not pin_salt or salt_invalido:
+                semilla_pin = pin_plano.strip() if isinstance(pin_plano, str) and pin_plano.strip() else "1234"
+                nuevo_salt = secrets.token_hex(16)
+                nuevo_hash = self._calcular_hash_pin(semilla_pin, nuevo_salt)
+                pares = [
+                    ("pin_salt", nuevo_salt),
+                    ("pin_hash", nuevo_hash),
+                ]
+                if semilla_pin != "1234":
+                    pares.append(("pin_personalizado", "1"))
+                for k, v in pares:
+                    cursor.execute(
+                        "INSERT INTO perfil_progreso (clave, valor) VALUES (?, ?) "
+                        "ON CONFLICT(clave) DO UPDATE SET valor = excluded.valor",
+                        (k, v),
+                    )
+
+            if pin_plano:
+                cursor.execute("DELETE FROM perfil_progreso WHERE clave = 'pin_docente'")
 
     def esta_pin_bloqueado(self) -> Tuple[bool, int]:
         """Retorna (bloqueado, segundos_restantes) persistente entre reinicios."""
-        hasta_str = self.obtener_preferencia("pin_bloqueado_hasta", "0")
-        try:
-            hasta_ts = float(hasta_str)
-        except ValueError:
-            hasta_ts = 0.0
-        ahora = time.time()
-        if hasta_ts > ahora:
-            return True, max(1, int(round(hasta_ts - ahora)))
-        if hasta_ts > 0:
-            self.guardar_preferencia("pin_bloqueado_hasta", "0")
-            self.guardar_preferencia("pin_intentos_fallidos", "0")
-        return False, 0
+        with self._lock:
+            hasta_str = self.obtener_preferencia("pin_bloqueado_hasta", "0")
+            corrupto = False
+            try:
+                hasta_ts = float(hasta_str)
+                if not math.isfinite(hasta_ts) or hasta_ts < 0:
+                    hasta_ts = 0.0
+                    corrupto = True
+            except (TypeError, ValueError):
+                hasta_ts = 0.0
+                corrupto = True
+
+            ahora = time.time()
+            if hasta_ts > ahora:
+                return True, max(1, int(round(hasta_ts - ahora)))
+
+            if hasta_ts > 0 or corrupto:
+                with self._transaccion_inmediata() as conn:
+                    cursor = conn.cursor()
+                    cursor.execute(
+                        "INSERT INTO perfil_progreso (clave, valor) VALUES ('pin_bloqueado_hasta', '0') "
+                        "ON CONFLICT(clave) DO UPDATE SET valor = excluded.valor"
+                    )
+                    if hasta_ts > 0:
+                        cursor.execute(
+                            "INSERT INTO perfil_progreso (clave, valor) VALUES ('pin_intentos_fallidos', '0') "
+                            "ON CONFLICT(clave) DO UPDATE SET valor = excluded.valor"
+                        )
+            return False, 0
 
     def verificar_pin_docente(self, pin_ingresado: str) -> bool:
         """Verifica el PIN contra su hash PBKDF2 en tiempo constante."""
+        if not isinstance(pin_ingresado, str):
+            return False
+        limpio = pin_ingresado.strip()
+        if not re.fullmatch(r"[0-9]+", limpio):
+            return False
+
         bloqueado, _ = self.esta_pin_bloqueado()
         if bloqueado:
             return False
-        pin_salt = self.obtener_preferencia("pin_salt", "")
-        pin_hash = self.obtener_preferencia("pin_hash", "")
+
+        with self._conectar() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT clave, valor FROM perfil_progreso WHERE clave IN ('pin_salt', 'pin_hash')"
+            )
+            datos_pin = {row["clave"]: str(row["valor"]) for row in cursor.fetchall() if row["valor"] is not None}
+        pin_salt = datos_pin.get("pin_salt", "")
+        pin_hash = datos_pin.get("pin_hash", "")
         if not pin_salt or not pin_hash:
             self._migrar_seguridad_pin()
-            pin_salt = self.obtener_preferencia("pin_salt", "")
-            pin_hash = self.obtener_preferencia("pin_hash", "")
-        candidato = self._calcular_hash_pin(pin_ingresado, pin_salt)
+            with self._conectar() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT clave, valor FROM perfil_progreso WHERE clave IN ('pin_salt', 'pin_hash')"
+                )
+                datos_pin = {row["clave"]: str(row["valor"]) for row in cursor.fetchall() if row["valor"] is not None}
+            pin_salt = datos_pin.get("pin_salt", "")
+            pin_hash = datos_pin.get("pin_hash", "")
+        try:
+            candidato = self._calcular_hash_pin(limpio, pin_salt)
+        except ValueError:
+            return False
         return hmac.compare_digest(candidato, pin_hash)
 
     def registrar_intento_pin(self, pin_ingresado: str) -> Tuple[bool, int, int]:
@@ -751,47 +996,89 @@ class RepositorioTDAH:
         if bloqueado:
             return False, 0, seg_restantes
 
-        if self.verificar_pin_docente(pin_ingresado):
-            self.guardar_preferencia("pin_intentos_fallidos", "0")
-            self.guardar_preferencia("pin_bloqueado_hasta", "0")
-            self.registrar_evento_auditoria("PIN_EXITOSO", "SEGURIDAD", "Acceso docente autorizado")
-            return True, self.MAX_INTENTOS_PIN, 0
+        es_valido = self.verificar_pin_docente(pin_ingresado)
 
-        fallidos = int(self.obtener_preferencia("pin_intentos_fallidos", "0")) + 1
-        if fallidos >= self.MAX_INTENTOS_PIN:
-            hasta = time.time() + self.SEGUNDOS_BLOQUEO_PIN
-            self.guardar_preferencia("pin_bloqueado_hasta", f"{hasta:.2f}")
-            self.guardar_preferencia("pin_intentos_fallidos", str(fallidos))
-            self.registrar_evento_auditoria(
-                "PIN_BLOQUEADO",
-                "SEGURIDAD",
-                f"Bloqueo temporal por {self.SEGUNDOS_BLOQUEO_PIN}s tras {fallidos} intentos fallidos",
-            )
-            return False, 0, self.SEGUNDOS_BLOQUEO_PIN
+        evento_auditoria: Optional[Tuple[str, str, str]] = None
+        resultado: Tuple[bool, int, int]
+        with self._transaccion_inmediata() as conn:
+            cursor = conn.cursor()
+            if es_valido:
+                for k, v in (("pin_intentos_fallidos", "0"), ("pin_bloqueado_hasta", "0")):
+                    cursor.execute(
+                        "INSERT INTO perfil_progreso (clave, valor) VALUES (?, ?) "
+                        "ON CONFLICT(clave) DO UPDATE SET valor = excluded.valor",
+                        (k, v),
+                    )
+                evento_auditoria = ("PIN_EXITOSO", "SEGURIDAD", "Acceso docente autorizado")
+                resultado = (True, self.MAX_INTENTOS_PIN, 0)
+            else:
+                cursor.execute("SELECT valor FROM perfil_progreso WHERE clave = 'pin_intentos_fallidos'")
+                r_fal = cursor.fetchone()
+                fallidos = self._parsear_int_seguro(r_fal["valor"] if r_fal else None, 0, minimo=0) + 1
+                if fallidos >= self.MAX_INTENTOS_PIN:
+                    hasta = time.time() + self.SEGUNDOS_BLOQUEO_PIN
+                    for k, v in (("pin_bloqueado_hasta", f"{hasta:.2f}"), ("pin_intentos_fallidos", str(fallidos))):
+                        cursor.execute(
+                            "INSERT INTO perfil_progreso (clave, valor) VALUES (?, ?) "
+                            "ON CONFLICT(clave) DO UPDATE SET valor = excluded.valor",
+                            (k, v),
+                        )
+                    evento_auditoria = (
+                        "PIN_BLOQUEADO",
+                        "SEGURIDAD",
+                        f"Bloqueo temporal por {self.SEGUNDOS_BLOQUEO_PIN}s tras {fallidos} intentos fallidos",
+                    )
+                    resultado = (False, 0, self.SEGUNDOS_BLOQUEO_PIN)
+                else:
+                    cursor.execute(
+                        "INSERT INTO perfil_progreso (clave, valor) VALUES ('pin_intentos_fallidos', ?) "
+                        "ON CONFLICT(clave) DO UPDATE SET valor = excluded.valor",
+                        (str(fallidos),),
+                    )
+                    evento_auditoria = (
+                        "PIN_FALLIDO",
+                        "SEGURIDAD",
+                        f"Intento fallido #{fallidos} de ingreso al Panel Docente",
+                    )
+                    resultado = (False, self.MAX_INTENTOS_PIN - fallidos, 0)
 
-        self.guardar_preferencia("pin_intentos_fallidos", str(fallidos))
-        self.registrar_evento_auditoria(
-            "PIN_FALLIDO",
-            "SEGURIDAD",
-            f"Intento fallido #{fallidos} de ingreso al Panel Docente",
-        )
-        return False, self.MAX_INTENTOS_PIN - fallidos, 0
+        if evento_auditoria is not None:
+            self.registrar_evento_auditoria(*evento_auditoria)
+        return resultado
 
-    def cambiar_pin_docente(self, nuevo_pin: str):
+    def cambiar_pin_docente(self, nuevo_pin: str) -> bool:
+        if not isinstance(nuevo_pin, str):
+            return False
         limpio = nuevo_pin.strip()
+        if not re.fullmatch(r"[0-9]{4,6}", limpio):
+            return False
+
         nuevo_salt = secrets.token_hex(16)
         nuevo_hash = self._calcular_hash_pin(limpio, nuevo_salt)
-        self.guardar_preferencia("pin_salt", nuevo_salt)
-        self.guardar_preferencia("pin_hash", nuevo_hash)
-        self.guardar_preferencia("pin_personalizado", "1" if limpio != "1234" else "0")
-        self.guardar_preferencia("pin_intentos_fallidos", "0")
-        self.guardar_preferencia("pin_bloqueado_hasta", "0")
+        actualizaciones = (
+            ("pin_salt", nuevo_salt),
+            ("pin_hash", nuevo_hash),
+            ("pin_personalizado", "1" if limpio != "1234" else "0"),
+            ("pin_intentos_fallidos", "0"),
+            ("pin_bloqueado_hasta", "0"),
+        )
+        with self._transaccion_inmediata() as conn:
+            cursor = conn.cursor()
+            for k, v in actualizaciones:
+                cursor.execute(
+                    "INSERT INTO perfil_progreso (clave, valor) VALUES (?, ?) "
+                    "ON CONFLICT(clave) DO UPDATE SET valor = excluded.valor",
+                    (k, v),
+                )
         self.registrar_evento_auditoria("PIN_CAMBIADO", "SEGURIDAD", "Actualización de PIN docente con PBKDF2-HMAC-SHA256")
+        return True
 
     # --- GESTIÓN DE MÓDULOS CURRICULARES, TAREAS Y PENSUM ---
     def normalizar_modulo(self, categoria: str) -> str:
         """Unifica nombres de categorías hacia los 5 Módulos Curriculares oficiales."""
-        cat = _quitar_tildes((categoria or "").strip().lower())
+        if not isinstance(categoria, str):
+            return "Matemáticas"
+        cat = _quitar_tildes(categoria.strip().lower())
         if any(k in cat for k in ("ingl", "english")):
             return "Inglés"
         if any(k in cat for k in ("matem", "aritmet", "calcul")):
@@ -805,44 +1092,53 @@ class RepositorioTDAH:
         for mod in self.MODULOS_CURRICULARES:
             if _quitar_tildes(mod.lower()) == cat:
                 return mod
-        return (categoria or "Matemáticas").strip() or "Matemáticas"
+        return categoria.strip() or "Matemáticas"
 
     def listar_tareas(self) -> List[Dict]:
         with self._conectar() as conn:
             cursor = conn.cursor()
             cursor.execute("""
-                SELECT t.id, t.modulo_id, t.nombre, t.es_predeterminada, m.nombre AS nombre_modulo
+                SELECT
+                    t.id,
+                    t.modulo_id,
+                    t.nombre,
+                    t.es_predeterminada,
+                    m.nombre AS nombre_modulo,
+                    p.id AS paso_id,
+                    p.instruccion,
+                    p.pista_apoyo
                 FROM tareas t
                 LEFT JOIN modulos m ON t.modulo_id = m.id
-                ORDER BY t.es_predeterminada DESC, t.id ASC
+                LEFT JOIN pasos_tarea p ON p.tarea_id = t.id
+                ORDER BY t.es_predeterminada DESC, t.id ASC, p.numero_paso ASC
             """)
             filas = cursor.fetchall()
-            resultado = []
-            for f in filas:
-                tid = int(f["id"])
-                cursor.execute(
-                    "SELECT instruccion, pista_apoyo FROM pasos_tarea WHERE tarea_id = ? ORDER BY numero_paso ASC",
-                    (tid,),
-                )
-                filas_pasos = cursor.fetchall()
-                pasos = [r["instruccion"] for r in filas_pasos]
-                pistas = [r["pista_apoyo"] for r in filas_pasos]
+
+        tareas_por_id: Dict[int, Dict[str, Any]] = {}
+        for f in filas:
+            tid = int(f["id"])
+            tarea = tareas_por_id.get(tid)
+            if tarea is None:
                 cat_efectiva = f["nombre_modulo"] or "Matemáticas"
-                resultado.append({
+                tarea = {
                     "id": tid,
                     "modulo_id": f["modulo_id"],
                     "nombre": f["nombre"],
                     "categoria": self.normalizar_modulo(cat_efectiva),
-                    "pasos": pasos,
-                    "pistas": pistas,
+                    "pasos": [],
+                    "pistas": [],
                     "es_predeterminada": bool(f["es_predeterminada"]),
-                })
-            return resultado
+                }
+                tareas_por_id[tid] = tarea
+            if f["paso_id"] is not None:
+                tarea["pasos"].append(f["instruccion"])
+                tarea["pistas"].append(f["pista_apoyo"])
+        return list(tareas_por_id.values())
 
     def listar_tareas_por_modulo(self, categoria: str) -> List[Dict]:
         """Filtra las misiones pertenecientes a un Módulo Curricular específico."""
         todas = self.listar_tareas()
-        if not categoria or categoria.strip().lower() in ("todos", "todas", ""):
+        if not isinstance(categoria, str) or categoria.strip().lower() in ("todos", "todas", ""):
             return todas
         mod_norm = self.normalizar_modulo(categoria)
         return [t for t in todas if self.normalizar_modulo(t.get("categoria", "")) == mod_norm]
@@ -927,17 +1223,33 @@ class RepositorioTDAH:
     ) -> int:
         guardadas = 0
         for item in lista_tareas or []:
-            nombre = str(item.get("nombre", "")).strip()
-            pasos = item.get("pasos") or []
-            pistas = item.get("pistas") or []
-            cat = self.normalizar_modulo(str(item.get("categoria") or categoria_defecto))
-            if nombre and pasos and self.guardar_tarea(nombre, pasos, pistas, categoria=cat):
-                guardadas += 1
+            if not isinstance(item, dict):
+                continue
+            nombre = item.get("nombre", "")
+            pasos = item.get("pasos")
+            pistas = item.get("pistas")
+            cat_raw = item.get("categoria") or categoria_defecto
+            cat = self.normalizar_modulo(cat_raw if isinstance(cat_raw, str) else categoria_defecto)
+            if not isinstance(nombre, str) or not nombre.strip():
+                continue
+            if not isinstance(pasos, (list, tuple)):
+                continue
+            pasos_validos = [p.strip() for p in pasos if isinstance(p, str) and p.strip()]
+            if not pasos_validos:
+                continue
+            try:
+                if self.guardar_tarea(nombre.strip(), pasos_validos, pistas, categoria=cat):
+                    guardadas += 1
+            except ValueError:
+                continue
         return guardadas
 
     def obtener_tarea(self, nombre: str) -> Optional[Dict]:
+        if not isinstance(nombre, str) or not nombre.strip():
+            return None
+        objetivo = nombre.strip().lower()
         for t in self.listar_tareas():
-            if t["nombre"].lower() == nombre.lower():
+            if t["nombre"].strip().lower() == objetivo:
                 return t
         return None
 
@@ -948,24 +1260,35 @@ class RepositorioTDAH:
         pistas: Optional[List[str]] = None,
         categoria: str = "Personalizada",
     ) -> bool:
-        pasos_limpios = [p.strip() for p in pasos if p and p.strip()]
+        if not isinstance(nombre, str) or not nombre.strip():
+            raise ValueError("El nombre de la tarea debe ser un texto no vacío.")
+        if not isinstance(pasos, (list, tuple)) or any(not isinstance(p, str) for p in pasos):
+            raise ValueError("Los pasos de la tarea deben ser una lista de textos válidos.")
+        pasos_limpios = [p.strip() for p in pasos if p.strip()]
         if not pasos_limpios:
-            return False
+            raise ValueError("La tarea debe incluir al menos un paso válido.")
+
+        if pistas is not None and not isinstance(pistas, (list, tuple)):
+            pistas = None
+
         if not pistas or len(pistas) < len(pasos_limpios):
-            pistas_completas = [p.strip() for p in (pistas or [])]
+            pistas_completas = [
+                p.strip() if isinstance(p, str) and p.strip() else f"Haz solo el paso {i + 1} con calma."
+                for i, p in enumerate(pistas or [])
+            ]
             while len(pistas_completas) < len(pasos_limpios):
                 idx = len(pistas_completas) + 1
                 pistas_completas.append(f"Haz solo el paso {idx} con calma. Si tienes dudas, pregúntale a Haru IA.")
         else:
             pistas_completas = [
-                p.strip() if p and p.strip() else f"Haz solo el paso {i + 1} con calma."
+                p.strip() if isinstance(p, str) and p.strip() else f"Haz solo el paso {i + 1} con calma."
                 for i, p in enumerate(pistas[:len(pasos_limpios)])
             ]
 
         mod_norm = self.normalizar_modulo(categoria)
         nombre_limpio = nombre.strip()
         ahora = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        with self._conectar() as conn:
+        with self._transaccion_inmediata() as conn:
             cursor = conn.cursor()
             mod_id = self._obtener_o_crear_modulo_id(cursor, mod_norm)
             cursor.execute(
@@ -980,7 +1303,6 @@ class RepositorioTDAH:
             cursor.execute("SELECT id FROM tareas WHERE nombre = ?", (nombre_limpio,))
             tarea_id = int(cursor.fetchone()["id"])
             self._sincronizar_pasos_normalizados(cursor, tarea_id, pasos_limpios, pistas_completas)
-            conn.commit()
         self.registrar_evento_auditoria(
             "TAREA_GUARDADA",
             "TAREAS",
@@ -990,19 +1312,22 @@ class RepositorioTDAH:
         return True
 
     def eliminar_tarea(self, nombre: str) -> bool:
-        with self._conectar() as conn:
+        if not isinstance(nombre, str) or not nombre.strip():
+            return False
+        nombre_limpio = nombre.strip()
+        with self._transaccion_inmediata() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT COUNT(*) as total FROM tareas")
             if cursor.fetchone()["total"] <= 1:
+                conn.rollback()
                 return False
-            cursor.execute("SELECT id FROM tareas WHERE nombre = ?", (nombre,))
+            cursor.execute("SELECT id FROM tareas WHERE nombre = ?", (nombre_limpio,))
             row = cursor.fetchone()
             tid = int(row["id"]) if row else None
-            cursor.execute("DELETE FROM tareas WHERE nombre = ?", (nombre,))
+            cursor.execute("DELETE FROM tareas WHERE nombre = ?", (nombre_limpio,))
             eliminado = cursor.rowcount > 0
-            conn.commit()
         if eliminado:
-            self.registrar_evento_auditoria("TAREA_ELIMINADA", "TAREAS", f"Misión '{nombre}' eliminada", referencia_id=tid)
+            self.registrar_evento_auditoria("TAREA_ELIMINADA", "TAREAS", f"Misión '{nombre_limpio}' eliminada", referencia_id=tid)
         return eliminado
 
     def restaurar_misiones_predeterminadas(self) -> None:
@@ -1083,9 +1408,10 @@ class RepositorioTDAH:
             conn.commit()
 
     def obtener_bitacora_descansos(self, limite: int = 30) -> List[Dict]:
+        lim = self._parsear_int_seguro(limite, 30, minimo=1)
         with self._conectar() as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT * FROM bitacora_descansos ORDER BY id DESC LIMIT ?", (limite,))
+            cursor.execute("SELECT * FROM bitacora_descansos ORDER BY id DESC LIMIT ?", (lim,))
             return [dict(row) for row in cursor.fetchall()]
 
     def registrar_sesion(
@@ -1102,7 +1428,7 @@ class RepositorioTDAH:
         intervalo_promedio_descanso_seg: int = 0,
     ):
         ahora = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        with self._conectar() as conn:
+        with self._transaccion_inmediata() as conn:
             cursor = conn.cursor()
             tarea_id, modulo_id = self._resolver_fk_tarea_y_modulo(cursor, nombre_tarea)
             cursor.execute(
@@ -1131,11 +1457,18 @@ class RepositorioTDAH:
                 ),
             )
             sesion_id = int(cursor.lastrowid)
-            conn.commit()
 
-        if estado_final == "COMPLETADA":
-            actual_tareas = int(self.obtener_preferencia("tareas_completadas", "0"))
-            self.guardar_preferencia("tareas_completadas", str(actual_tareas + 1))
+            if estado_final == "COMPLETADA":
+                cursor.execute("SELECT valor FROM perfil_progreso WHERE clave = 'tareas_completadas'")
+                r_tc = cursor.fetchone()
+                actual_tareas = self._parsear_int_seguro(r_tc["valor"] if r_tc else None, 0, minimo=0)
+                cursor.execute(
+                    """
+                    INSERT INTO perfil_progreso (clave, valor) VALUES ('tareas_completadas', ?)
+                    ON CONFLICT(clave) DO UPDATE SET valor = excluded.valor
+                    """,
+                    (str(actual_tareas + 1),),
+                )
 
         self.registrar_evento_auditoria(
             "SESION_REGISTRADA",
@@ -1145,58 +1478,79 @@ class RepositorioTDAH:
         )
 
     def sumar_estrellas(self, cantidad: int) -> int:
-        actual = int(self.obtener_preferencia("estrellas_totales", "0"))
-        nuevo = max(0, actual + cantidad)
-        self.guardar_preferencia("estrellas_totales", str(nuevo))
-        return nuevo
+        delta = self._parsear_int_seguro(cantidad, 0)
+        with self._transaccion_inmediata() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT valor FROM perfil_progreso WHERE clave = 'estrellas_totales'")
+            r_tot = cursor.fetchone()
+            actual = self._parsear_int_seguro(r_tot["valor"] if r_tot else None, 5, minimo=0)
+            nuevo = max(0, actual + delta)
+            cursor.execute(
+                """
+                INSERT INTO perfil_progreso (clave, valor) VALUES ('estrellas_totales', ?)
+                ON CONFLICT(clave) DO UPDATE SET valor = excluded.valor
+                """,
+                (str(nuevo),),
+            )
+            return nuevo
 
     def obtener_estrellas(self) -> int:
-        return int(self.obtener_preferencia("estrellas_totales", "5"))
+        return self.obtener_preferencia_int("estrellas_totales", 5, minimo=0)
 
     def obtener_estrellas_gastadas(self) -> int:
-        try:
-            return max(0, int(self.obtener_preferencia("estrellas_gastadas", "0")))
-        except ValueError:
-            return 0
+        return self.obtener_preferencia_int("estrellas_gastadas", 0, minimo=0)
 
     def obtener_estrellas_disponibles(self) -> int:
         """Fichas disponibles para canjear premios reales sin perder medallas/trajes históricos."""
-        return max(0, self.obtener_estrellas() - self.obtener_estrellas_gastadas())
+        with self._lock:
+            with self._conectar() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT clave, valor FROM perfil_progreso "
+                    "WHERE clave IN ('estrellas_totales', 'estrellas_gastadas')"
+                )
+                vals = {row["clave"]: row["valor"] for row in cursor.fetchall()}
+                totales = self._parsear_int_seguro(vals.get("estrellas_totales"), 5, minimo=0)
+                gastadas = self._parsear_int_seguro(vals.get("estrellas_gastadas"), 0, minimo=0)
+                return max(0, totales - gastadas)
 
     def consumir_estrellas_ayuda(
         self, costo: int = 1, detalle: str = "Ayuda guiada en archivo escolar"
     ) -> Tuple[bool, int]:
         """Consume fichas disponibles por Súper Ayuda en archivo sin perder medallas/trajes."""
-        costo_limpio = max(1, int(costo))
-        with self._conectar() as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT valor FROM perfil_progreso WHERE clave = 'estrellas_totales'")
-            r_tot = cursor.fetchone()
-            totales = int(r_tot["valor"]) if r_tot else 5
+        with self._lock:
+            if isinstance(costo, bool) or not isinstance(costo, int) or costo <= 0:
+                return False, self.obtener_estrellas_disponibles()
 
-            cursor.execute("SELECT valor FROM perfil_progreso WHERE clave = 'estrellas_gastadas'")
-            r_gas = cursor.fetchone()
-            gastadas = max(0, int(r_gas["valor"])) if r_gas else 0
+            with self._transaccion_inmediata() as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT valor FROM perfil_progreso WHERE clave = 'estrellas_totales'")
+                r_tot = cursor.fetchone()
+                totales = self._parsear_int_seguro(r_tot["valor"] if r_tot else None, 5, minimo=0)
 
-            disponibles = max(0, totales - gastadas)
-            if disponibles < costo_limpio:
-                return False, disponibles
+                cursor.execute("SELECT valor FROM perfil_progreso WHERE clave = 'estrellas_gastadas'")
+                r_gas = cursor.fetchone()
+                gastadas = self._parsear_int_seguro(r_gas["valor"] if r_gas else None, 0, minimo=0)
 
-            nuevas_gastadas = gastadas + costo_limpio
-            nuevo_saldo = max(0, totales - nuevas_gastadas)
-            cursor.execute(
-                """
-                INSERT INTO perfil_progreso (clave, valor) VALUES ('estrellas_gastadas', ?)
-                ON CONFLICT(clave) DO UPDATE SET valor = excluded.valor
-                """,
-                (str(nuevas_gastadas),),
-            )
-            conn.commit()
+                disponibles = max(0, totales - gastadas)
+                if disponibles < costo:
+                    conn.rollback()
+                    return False, disponibles
+
+                nuevas_gastadas = gastadas + costo
+                nuevo_saldo = max(0, totales - nuevas_gastadas)
+                cursor.execute(
+                    """
+                    INSERT INTO perfil_progreso (clave, valor) VALUES ('estrellas_gastadas', ?)
+                    ON CONFLICT(clave) DO UPDATE SET valor = excluded.valor
+                    """,
+                    (str(nuevas_gastadas),),
+                )
 
         self.registrar_evento_auditoria(
             "AYUDA_ARCHIVO",
             "ECONOMIA_FICHAS",
-            f"{detalle} (-{costo_limpio} pts, saldo disponible: {nuevo_saldo})",
+            f"{detalle} (-{costo} pts, saldo disponible: {nuevo_saldo})",
         )
         return True, nuevo_saldo
 
@@ -1213,11 +1567,30 @@ class RepositorioTDAH:
         costo_estrellas: int,
         descripcion: str = "Premio pactado con familia/docente",
     ) -> bool:
-        tit = re.sub(r"\s+", " ", (titulo or "")).strip()[:90]
-        costo = max(1, min(999, int(costo_estrellas)))
-        desc = re.sub(r"\s+", " ", (descripcion or "")).strip()[:140]
+        if not isinstance(titulo, str):
+            return False
+        tit = re.sub(r"\s+", " ", titulo).strip()[:90]
         if not tit:
             return False
+
+        if isinstance(costo_estrellas, bool):
+            return False
+        if isinstance(costo_estrellas, int):
+            costo_num = costo_estrellas
+        elif isinstance(costo_estrellas, str):
+            txt_costo = costo_estrellas.strip()
+            if not re.fullmatch(r"[+-]?[0-9]+", txt_costo):
+                return False
+            costo_num = int(txt_costo)
+        else:
+            return False
+
+        if costo_num <= 0:
+            return False
+        costo = min(999, costo_num)
+
+        desc_txt = descripcion if isinstance(descripcion, str) else ""
+        desc = re.sub(r"\s+", " ", desc_txt).strip()[:140]
         with self._conectar() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -1234,9 +1607,11 @@ class RepositorioTDAH:
         return True
 
     def eliminar_recompensa_catalogo(self, recompensa_id: int) -> bool:
+        if isinstance(recompensa_id, bool) or not isinstance(recompensa_id, int):
+            return False
         with self._conectar() as conn:
             cursor = conn.cursor()
-            cursor.execute("DELETE FROM recompensas_catalogo WHERE id = ?", (int(recompensa_id),))
+            cursor.execute("DELETE FROM recompensas_catalogo WHERE id = ?", (recompensa_id,))
             ok = cursor.rowcount > 0
             conn.commit()
             return ok
@@ -1268,53 +1643,58 @@ class RepositorioTDAH:
 
     def canjear_recompensa(self, recompensa_id: int) -> Tuple[bool, str, int]:
         """Canjea un premio real verificando saldo disponible de forma atómica."""
-        with self._conectar() as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT * FROM recompensas_catalogo WHERE id = ?", (int(recompensa_id),))
-            fila = cursor.fetchone()
-            if not fila:
+        with self._lock:
+            if isinstance(recompensa_id, bool) or not isinstance(recompensa_id, int) or recompensa_id <= 0:
                 return False, "El premio seleccionado ya no existe.", self.obtener_estrellas_disponibles()
 
-            rid = int(fila["id"])
-            titulo = fila["titulo"]
-            costo = int(fila["costo_estrellas"])
+            with self._transaccion_inmediata() as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT * FROM recompensas_catalogo WHERE id = ?", (recompensa_id,))
+                fila = cursor.fetchone()
+                if not fila:
+                    conn.rollback()
+                    return False, "El premio seleccionado ya no existe.", self.obtener_estrellas_disponibles()
 
-            cursor.execute("SELECT valor FROM perfil_progreso WHERE clave = 'estrellas_totales'")
-            r_tot = cursor.fetchone()
-            totales = int(r_tot["valor"]) if r_tot else 5
+                rid = int(fila["id"])
+                titulo = fila["titulo"]
+                costo = self._parsear_int_seguro(fila["costo_estrellas"], 1, minimo=1)
 
-            cursor.execute("SELECT valor FROM perfil_progreso WHERE clave = 'estrellas_gastadas'")
-            r_gas = cursor.fetchone()
-            gastadas = int(r_gas["valor"]) if r_gas else 0
+                cursor.execute("SELECT valor FROM perfil_progreso WHERE clave = 'estrellas_totales'")
+                r_tot = cursor.fetchone()
+                totales = self._parsear_int_seguro(r_tot["valor"] if r_tot else None, 5, minimo=0)
 
-            disponibles = max(0, totales - gastadas)
-            if disponibles < costo:
-                faltan = costo - disponibles
-                return (
-                    False,
-                    f"Te faltan {faltan} puntos disponibles para canjear «{titulo}».",
-                    disponibles,
+                cursor.execute("SELECT valor FROM perfil_progreso WHERE clave = 'estrellas_gastadas'")
+                r_gas = cursor.fetchone()
+                gastadas = self._parsear_int_seguro(r_gas["valor"] if r_gas else None, 0, minimo=0)
+
+                disponibles = max(0, totales - gastadas)
+                if disponibles < costo:
+                    conn.rollback()
+                    faltan = costo - disponibles
+                    return (
+                        False,
+                        f"Te faltan {faltan} puntos disponibles para canjear «{titulo}».",
+                        disponibles,
+                    )
+
+                nuevas_gastadas = gastadas + costo
+                nuevo_saldo = max(0, totales - nuevas_gastadas)
+                ahora = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+                cursor.execute(
+                    """
+                    INSERT INTO perfil_progreso (clave, valor) VALUES ('estrellas_gastadas', ?)
+                    ON CONFLICT(clave) DO UPDATE SET valor = excluded.valor
+                    """,
+                    (str(nuevas_gastadas),),
                 )
-
-            nuevas_gastadas = gastadas + costo
-            nuevo_saldo = max(0, totales - nuevas_gastadas)
-            ahora = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-            cursor.execute(
-                """
-                INSERT INTO perfil_progreso (clave, valor) VALUES ('estrellas_gastadas', ?)
-                ON CONFLICT(clave) DO UPDATE SET valor = excluded.valor
-                """,
-                (str(nuevas_gastadas),),
-            )
-            cursor.execute(
-                """
-                INSERT INTO historial_canjes (recompensa_id, fecha_hora, titulo_premio, costo_estrellas)
-                VALUES (?, ?, ?, ?)
-                """,
-                (rid, ahora, titulo, costo),
-            )
-            conn.commit()
+                cursor.execute(
+                    """
+                    INSERT INTO historial_canjes (recompensa_id, fecha_hora, titulo_premio, costo_estrellas)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (rid, ahora, titulo, costo),
+                )
 
         self.registrar_evento_auditoria(
             "PREMIO_CANJEADO",
@@ -1325,9 +1705,10 @@ class RepositorioTDAH:
         return True, f"¡Felicidades! Canjeaste «{titulo}» (-{costo} puntos).", nuevo_saldo
 
     def obtener_historial_canjes(self, limite: int = 30) -> List[Dict]:
+        lim = self._parsear_int_seguro(limite, 30, minimo=1)
         with self._conectar() as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT * FROM historial_canjes ORDER BY id DESC LIMIT ?", (limite,))
+            cursor.execute("SELECT * FROM historial_canjes ORDER BY id DESC LIMIT ?", (lim,))
             return [dict(row) for row in cursor.fetchall()]
 
     def obtener_preferencia(self, clave: str, defecto: str = "") -> str:
@@ -1335,7 +1716,7 @@ class RepositorioTDAH:
             cursor = conn.cursor()
             cursor.execute("SELECT valor FROM perfil_progreso WHERE clave = ?", (clave,))
             row = cursor.fetchone()
-            return row["valor"] if row else defecto
+            return row["valor"] if (row and row["valor"] is not None) else defecto
 
     def guardar_preferencia(self, clave: str, valor: str):
         with self._conectar() as conn:
@@ -1350,45 +1731,98 @@ class RepositorioTDAH:
             conn.commit()
 
     def obtener_historial_sesiones(self, limite: int = 50) -> List[Dict]:
+        lim = self._parsear_int_seguro(limite, 50, minimo=1)
         with self._conectar() as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT * FROM sesiones_estudio ORDER BY id DESC LIMIT ?", (limite,))
+            cursor.execute("SELECT * FROM sesiones_estudio ORDER BY id DESC LIMIT ?", (lim,))
             return [dict(row) for row in cursor.fetchall()]
 
     def obtener_estadisticas_resumen(self) -> Dict:
         with self._conectar() as conn:
-            cursor = conn.cursor()
-            cursor.execute("""
-                SELECT
-                    COUNT(*) as total_sesiones,
-                    COALESCE(SUM(pasos_completados), 0) as total_pasos_logrados,
-                    COALESCE(SUM(segundos_concentracion), 0) as total_segundos_foco,
-                    COALESCE(SUM(pausas_activas), 0) as total_pausas_pomodoro,
-                    COALESCE(SUM(pausas_manuales), 0) as total_pausas_alumno,
-                    COALESCE(AVG(CASE WHEN intervalo_promedio_descanso_seg > 0 THEN intervalo_promedio_descanso_seg ELSE NULL END), 0) as promedio_cada_cuanto_descansa_seg,
-                    COALESCE(SUM(pistas_usadas), 0) as total_pistas
-                FROM sesiones_estudio
-            """)
-            r = dict(cursor.fetchone())
-            r["estrellas_totales"] = self.obtener_estrellas()
-            r["estrellas_disponibles"] = self.obtener_estrellas_disponibles()
-            r["estrellas_gastadas"] = self.obtener_estrellas_gastadas()
-            r["tareas_completadas"] = int(self.obtener_preferencia("tareas_completadas", "0"))
-            return r
+            inicio_tx = False
+            if not conn.in_transaction:
+                conn.execute("BEGIN")
+                inicio_tx = True
+            try:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT
+                        COUNT(*) as total_sesiones,
+                        COALESCE(SUM(pasos_completados), 0) as total_pasos_logrados,
+                        COALESCE(SUM(segundos_concentracion), 0) as total_segundos_foco,
+                        COALESCE(SUM(pausas_activas), 0) as total_pausas_pomodoro,
+                        COALESCE(SUM(pausas_manuales), 0) as total_pausas_alumno,
+                        COALESCE(AVG(CASE WHEN intervalo_promedio_descanso_seg > 0 THEN intervalo_promedio_descanso_seg ELSE NULL END), 0) as promedio_cada_cuanto_descansa_seg,
+                        COALESCE(SUM(pistas_usadas), 0) as total_pistas
+                    FROM sesiones_estudio
+                """)
+                r = dict(cursor.fetchone())
+                cursor.execute(
+                    "SELECT clave, valor FROM perfil_progreso "
+                    "WHERE clave IN ('estrellas_totales', 'estrellas_gastadas', 'tareas_completadas')"
+                )
+                prefs = {fila["clave"]: fila["valor"] for fila in cursor.fetchall()}
+            finally:
+                if inicio_tx and conn.in_transaction:
+                    try:
+                        conn.commit()
+                    except sqlite3.Error:
+                        pass
+
+        totales = self._parsear_int_seguro(prefs.get("estrellas_totales"), 5, minimo=0)
+        gastadas = self._parsear_int_seguro(prefs.get("estrellas_gastadas"), 0, minimo=0)
+        tareas_comp = self._parsear_int_seguro(prefs.get("tareas_completadas"), 0, minimo=0)
+        r["estrellas_totales"] = totales
+        r["estrellas_disponibles"] = max(0, totales - gastadas)
+        r["estrellas_gastadas"] = gastadas
+        r["tareas_completadas"] = tareas_comp
+        return r
+
+    _PALABRAS_INTERROGATIVAS = frozenset({
+        "que", "como", "por", "porque", "cuando", "donde",
+        "cual", "cuales", "cuanto", "cuantos", "quien", "quienes",
+        "explica", "explicame", "diferencia", "diferencias",
+        "ejemplo", "ejemplos", "para",
+    })
+    _STOPWORDS_PREGUNTA = frozenset({
+        "a", "al", "algo", "ante", "bajo", "como", "con", "contra",
+        "cual", "cuales", "cuando", "cuanto", "cuantos", "cuentame",
+        "de", "del", "desde", "dime", "donde", "dos", "el", "ella",
+        "ellas", "ellos", "en", "entre", "era", "es", "esa", "esas",
+        "ese", "eso", "esos", "esta", "estan", "estas", "este", "esto",
+        "estos", "explica", "explicame", "favor", "fue", "fueron", "hablame",
+        "hace", "hacen", "hacer", "haru", "hay", "hola", "la", "las",
+        "le", "les", "lo", "los", "mas", "me", "mi", "mis", "mucho",
+        "muy", "nos", "o", "para", "pero", "por", "porfa", "porque",
+        "puede", "pueden", "que", "quien", "quienes", "saber", "se",
+        "ser", "si", "sin", "sirve", "sirven", "sobre", "son", "su",
+        "sus", "te", "tema", "tiene", "tienen", "tu", "tus", "un",
+        "una", "unas", "uno", "unos", "y", "ya", "ayudame",
+        "significa", "definicion", "concepto", "llamado", "llama",
+    })
 
     def buscar_conocimiento(self, consulta: str) -> Optional[str]:
         """
-        Busca respuestas escolares locales usando límites de palabra exactos (`\\b`)
-        para no interceptar por accidente saludos acompañados de preguntas reales.
+        Busca respuestas escolares locales priorizando contención emocional y negaciones,
+        usando límites de palabra exactos (`\\b`) y evitando que entradas estáticas cortas
+        secuestren preguntas específicas o calificadas.
         """
-        consulta_norm = _quitar_tildes((consulta or "").lower()).strip()
+        if not isinstance(consulta, str):
+            return None
+        consulta_norm = _quitar_tildes(consulta.lower()).strip()
         if not consulta_norm:
             return None
 
         palabras_consulta = re.findall(r"[a-z0-9ñ]+", consulta_norm)
+        if not palabras_consulta:
+            return None
+
         tiene_interrogativo_complejo = any(
             p in palabras_consulta
             for p in ("como", "por", "porque", "cuando", "donde", "cual", "cuales", "cuanto", "cuantos", "explica", "diferencia", "ejemplo")
+        )
+        es_interrogativa = ("?" in consulta) or any(
+            p in self._PALABRAS_INTERROGATIVAS for p in palabras_consulta
         )
 
         with self._conectar() as conn:
@@ -1396,20 +1830,173 @@ class RepositorioTDAH:
             cursor.execute("SELECT palabra_clave, materia, respuesta_amigable FROM conocimiento_escolar")
             filas = cursor.fetchall()
 
-        filas_ordenadas = sorted(filas, key=lambda r: len(r["palabra_clave"]), reverse=True)
+        apoyo_por_clave: Dict[str, str] = {}
+        claves_academicas: List[str] = []
+        for row in filas:
+            cn = _quitar_tildes(row["palabra_clave"].lower()).strip()
+            if not cn:
+                continue
+            if row["materia"] == "Apoyo Emocional":
+                apoyo_por_clave[cn] = row["respuesta_amigable"]
+            elif row["materia"] not in ("Saludo", "Identidad", "Motivación", "Conversación", "Hábitos y Orden"):
+                claves_academicas.append(cn)
+
+        # Prioridad 1: Negación de ánimo positivo y señales directas de angustia emocional
+        if re.search(
+            r"\b(?:no|nunca|tampoco|nada)\s+(?:(?:me\s+siento|estoy|soy|anda|ando|estaba|fui|me\s+fue)\s+){0,2}"
+            r"(?:nada\s+|muy\s+|tan\s+)?(?:feliz|felices|content[oa]s?|alegre|alegres|bien|animad[oa]s?|genial|excelente)\b",
+            consulta_norm,
+        ):
+            return apoyo_por_clave.get(
+                "no estoy feliz",
+                "Está bien no sentirse feliz ahora mismo. Respira despacito conmigo y vamos paso a paso sin apuro.",
+            )
+
+        if re.search(r"\bme\s+fue\s+(?:muy\s+|re\s+|super\s+|tan\s+)?mal\b", consulta_norm):
+            return apoyo_por_clave.get(
+                "me fue mal",
+                "Un mal momento no borra todo lo que eres capaz de lograr. Respiremos con calma y avancemos poco a poco.",
+            )
+
+        if re.search(
+            r"(?<!\bno\s)(?<!\bnunca\s)(?<!\btampoco\s)\b(?:estoy|me\s+siento|anda|ando|estaba)\s+"
+            r"(?:muy\s+|re\s+|algo\s+|un\s+poco\s+|tan\s+)?(?:triste|tristes|mal|fatal|horrible|desanimad[oa]s?|abrumad[oa]s?)\b",
+            consulta_norm,
+        ):
+            return apoyo_por_clave.get(
+                "estoy triste",
+                "Siento mucho que te sientas triste hoy. Estoy aquí para acompañarte con calma.",
+            )
+
+        if re.search(
+            r"(?<!\bno\s)(?<!\bnunca\s)(?<!\btampoco\s)\b(?:estoy|me\s+siento|anda|ando|estaba)\s+"
+            r"(?:muy\s+|re\s+|algo\s+|un\s+poco\s+|tan\s+)?(?:frustrad[oa]s?|enojad[oa]s?|molest[oa]s?|angustiad[oa]s?|ansios[oa]s?|nervios[oa]s?)\b"
+            r"|\b(?:quiero\s+llorar|me\s+rindo|ya\s+no\s+quiero\s+intentar|odio\s+estudiar)\b",
+            consulta_norm,
+        ):
+            return apoyo_por_clave.get(
+                "estoy frustrado",
+                "Es normal sentir frustración cuando algo cuesta trabajo. Hagamos una pausa corta y probemos juntos.",
+            )
+
+        if re.search(
+            r"(?<!\bno\s)(?<!\bnunca\s)\b(?:soy|me\s+siento)\s+(?:un\s+|una\s+|muy\s+|re\s+)?(?:tont[oa]|brut[oa]|burr[oa]|torpe|incapaz|inutil)\b",
+            consulta_norm,
+        ):
+            return apoyo_por_clave.get(
+                "soy tonto",
+                "No eres tonto para nada; tu mente solo necesita un poco más de tiempo y calma para aprenderlo.",
+            )
+
+        m_frust = re.search(r"\b(no\s+me\s+sale|no\s+puedo|no\s+entiendo(?:\s+nada|\s+esto)?)\b", consulta_norm)
+        if m_frust:
+            tiene_pregunta_especifica = bool(
+                re.search(r"\b(?:por\s+que|que\s+es|que\s+son|cual\s+es|como\s+se|diferencia)\b", consulta_norm)
+            )
+            tiene_tema_academico = any(
+                re.search(rf"\b{re.escape(ck)}\b", consulta_norm) for ck in claves_academicas
+            )
+            if not tiene_pregunta_especifica and not tiene_tema_academico:
+                frase = m_frust.group(1)
+                if frase.startswith("no me sale"):
+                    return apoyo_por_clave.get("no me sale")
+                if frase.startswith("no puedo"):
+                    return apoyo_por_clave.get("no puedo")
+                return apoyo_por_clave.get("no entiendo")
+
+        # Prioridad 2: Búsqueda en conocimiento general/curricular con guardas de negación y especificidad
+        filas_ordenadas = sorted(
+            (r for r in filas if r["materia"] != "Apoyo Emocional"),
+            key=lambda r: len(r["palabra_clave"]),
+            reverse=True,
+        )
+        es_pregunta_especifica_academica = bool(
+            re.search(
+                r"\bpor\s+que\b|\b(?:donde|cuando)\b"
+                r"|\b(?:diferencia|diferencias|comparacion|compara|ventajas|desventajas|tipos|clases)\b"
+                r"|\bcomo\s+(?:funciona|se\s+(?:dice|escribe|pronuncia|traduce|calcula|resuelve|hace))\b"
+                r"|\bpara\s+que\s+(?:sirve|sirven)\b",
+                consulta_norm,
+            )
+        )
+        es_solicitud_explicacion_academica = bool(
+            re.search(
+                r"\b(?:que\s+(?:es|son|significa)|como\s+(?:es|son)|definicion\s+de|concepto\s+de|"
+                r"explicame|explica|dime|hablame|cuentame)\b",
+                consulta_norm,
+            )
+        )
+
         for row in filas_ordenadas:
             clave_norm = _quitar_tildes(row["palabra_clave"].lower()).strip()
             if not clave_norm:
                 continue
             patron = rf"\b{re.escape(clave_norm)}\b"
-            if not re.search(patron, consulta_norm):
+            m = re.search(patron, consulta_norm)
+            if not m:
+                continue
+
+            prefijo = consulta_norm[:m.start()]
+            clausula_prefijo = re.split(
+                r"[,.!;?]|\b(?:pero|sino|aunque)\b|\by\s+(?=(?:quiero|dime|cuentame|dame|explicame|hablame)\b)",
+                prefijo,
+            )[-1]
+            neg_directa = bool(
+                re.search(
+                    r"\b(?:ya\s+)?(?:no|nunca|tampoco|jamas|sin)\s+"
+                    r"(?:(?:estoy|esta|estas|estan|soy|es|son|ser|me\s+siento|parece|fue|era|"
+                    r"quiero|necesito|tengo|hay|"
+                    r"(?:(?:me|te|le|nos)\s+)?(?:cuentes|cuentas|digas|dices|des|hagas|muestres|ensenes|expliques))\s+){0,3}"
+                    r"(?:(?:el|la|los|las|ese|esa|esos|esas|este|esta|estos|estas|"
+                    r"otro|otra|otros|otras|ningun|ninguna|algun|alguna|"
+                    r"nada|muy|tan|un|una|unos|unas)\s+){0,2}$",
+                    clausula_prefijo,
+                )
+            )
+            neg_deseo_clausula = bool(
+                re.search(
+                    r"\b(?:no|nunca|tampoco|jamas)\s+(?:(?:me|te|le|nos)\s+)?"
+                    r"(?:quiero|queremos|quieras|deseo|deseamos|gusta|gustaria|prefiero|pid[oa]|voy\s+a\s+pedir|necesito|hace\s+falta)\b",
+                    clausula_prefijo,
+                )
+            )
+            if neg_directa or neg_deseo_clausula:
                 continue
 
             if clave_norm == "hola" and (len(palabras_consulta) > 4 or "?" in consulta or tiene_interrogativo_complejo):
                 continue
 
-            if len(clave_norm.split()) == 1 and len(palabras_consulta) > 7 and tiene_interrogativo_complejo and row["materia"] not in ("Identidad", "Apoyo Emocional", "Hábitos y Orden"):
+            if clave_norm == "gracias" and (
+                "?" in consulta
+                or tiene_interrogativo_complejo
+                or "como se dice" in consulta_norm
+                or "que significa" in consulta_norm
+                or "en ingles" in consulta_norm
+            ):
                 continue
+
+            es_materia_academica = row["materia"] not in (
+                "Saludo", "Identidad", "Motivación", "Conversación", "Hábitos y Orden", "Apoyo Emocional"
+            )
+            if es_materia_academica:
+                if es_pregunta_especifica_academica:
+                    continue
+                if es_interrogativa or es_solicitud_explicacion_academica:
+                    clave_tokens = set(re.findall(r"[a-z0-9ñ]+", clave_norm))
+                    tokens_extra = [
+                        tok for tok in palabras_consulta
+                        if (len(tok) > 1 or tok.isdigit())
+                        and tok not in clave_tokens
+                        and tok not in self._STOPWORDS_PREGUNTA
+                    ]
+                    if es_solicitud_explicacion_academica and tokens_extra:
+                        continue
+                    resp_norm = _quitar_tildes((row["respuesta_amigable"] or "").lower())
+                    resp_tokens = set(re.findall(r"[a-z0-9ñ]+", resp_norm))
+                    if any(tok not in resp_tokens for tok in tokens_extra):
+                        continue
+                elif len(clave_norm.split()) == 1 and len(palabras_consulta) > 7 and tiene_interrogativo_complejo:
+                    continue
 
             return row["respuesta_amigable"]
         return None

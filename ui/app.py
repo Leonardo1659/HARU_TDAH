@@ -25,8 +25,8 @@ from core.herramientas_multimodales import GestorMultimodal
 from core.ia import MotorIAHaru
 from core.motor_tdah import MotorTDAH
 from core.repositorio_db import RepositorioTDAH
+from core.semaforo_visual import ControladorHardwareLEDs, ControladorSemaforoVisual
 from core.voz import EscuchaVozHaru, MotorVozHaru
-from hardware.control_leds import ControladorHardwareLEDs
 from ui.avatar_sprite import REQUISITOS_SKIN, EscenarioCentralHaru
 from ui.iconos import aplicar_icono_ventana_haru, icono_ctk, icono_skin_ctk
 from ui.karaoke import SubtitulosKaraoke
@@ -79,9 +79,7 @@ class VentanaPrincipalHaru(ctk.CTk):
             forzar_modo_privado=self.ia.modo_privado,
         )
 
-        puerto_com = self.db.obtener_preferencia("puerto_arduino", "COM15")
-        self.hardware = ControladorHardwareLEDs(
-            puerto_default=puerto_com,
+        self.hardware = ControladorSemaforoVisual(
             callback_gui=lambda leds, ev: self.bus.emitir("leds_cambio", leds=leds, evento=ev),
         )
 
@@ -421,7 +419,7 @@ class VentanaPrincipalHaru(ctk.CTk):
         col_der = ctk.CTkFrame(self.stage, fg_color="transparent")
         col_der.grid(row=1, column=2, sticky="ne", padx=(8, 22), pady=4)
 
-        # 1. Tarjeta Semáforo Arduino UNO R3 (Inicio / Avance / Meta)
+        # 1. Tarjeta Semáforo Visual Pedagógico (Inicio / Avance / Meta)
         self.card_semaforo = ctk.CTkFrame(
             col_der,
             fg_color=self.tema["card_bg"],
@@ -443,8 +441,8 @@ class VentanaPrincipalHaru(ctk.CTk):
         self.lbl_tit_semaforo.pack(side="left")
         self.lbl_sub_semaforo = ctk.CTkLabel(
             cab_sem,
-            text=" Simulación" if self.hardware.en_simulacion else f" {self.hardware.puerto_actual}",
-            image=icono_ctk("cpu", self.tema["text_secondary"], 14),
+            text=" Guía Visual",
+            image=icono_ctk("eye", self.tema["text_secondary"], 14),
             compound="left",
             font=ctk.CTkFont(size=11, weight="bold"),
             text_color=self.tema["text_secondary"],
@@ -919,17 +917,49 @@ class VentanaPrincipalHaru(ctk.CTk):
             }
             self.voz.hablar(frases.get(clave_skin, f"¡Traje de {nombre} listo!"))
 
-    def _limpiar_adjunto_pendiente(self) -> None:
-        self._documento_adjunto_pendiente = None
-        if hasattr(self, "btn_adjuntar_ia") and self.btn_adjuntar_ia.winfo_exists():
+    def _actualizar_indicador_documento_activo(self) -> None:
+        if not hasattr(self, "btn_adjuntar_ia") or not self.btn_adjuntar_ia.winfo_exists():
+            return
+        t = self.tema
+        if self._documento_adjunto_pendiente is not None:
             self.btn_adjuntar_ia.configure(
-                fg_color=self.tema["btn_purple"],
-                hover_color=self.tema["btn_purple_hover"],
+                fg_color=t["btn_green"],
+                hover_color=t["btn_green_hover"],
+                text="1",
+                width=46,
+            )
+            return
+        info_doc = (
+            self.motor.obtener_info_documento_activo()
+            if hasattr(self.motor, "obtener_info_documento_activo")
+            else None
+        )
+        if info_doc and info_doc.get("total_ejercicios"):
+            actual = int(info_doc.get("ejercicio_actual") or 1)
+            total = int(info_doc.get("total_ejercicios") or 1)
+            self.btn_adjuntar_ia.configure(
+                fg_color=t["btn_green"],
+                hover_color=t["btn_green_hover"],
+                text=f"{actual}/{total}",
+                width=64,
+            )
+            if hasattr(self, "entry_ia") and self.entry_ia.winfo_exists():
+                self.entry_ia.configure(
+                    placeholder_text=f"Archivo activo ({actual}/{total}): di 'siguiente' o el número..."
+                )
+        else:
+            self.btn_adjuntar_ia.configure(
+                fg_color=t["btn_purple"],
+                hover_color=t["btn_purple_hover"],
                 text="",
                 width=38,
             )
-        if hasattr(self, "entry_ia") and self.entry_ia.winfo_exists():
-            self.entry_ia.configure(placeholder_text="Pregúntale a Haru IA...")
+            if hasattr(self, "entry_ia") and self.entry_ia.winfo_exists():
+                self.entry_ia.configure(placeholder_text="Pregúntale a Haru IA...")
+
+    def _limpiar_adjunto_pendiente(self) -> None:
+        self._documento_adjunto_pendiente = None
+        self._actualizar_indicador_documento_activo()
 
     def _enviar_pregunta_ia(self) -> None:
         pregunta = self.entry_ia.get().strip()[:360]
@@ -952,7 +982,7 @@ class VentanaPrincipalHaru(ctk.CTk):
     def _adjuntar_archivo_estudio_nino(self) -> None:
         ruta = filedialog.askopenfilename(
             parent=self,
-            title="Selecciona tu hoja o archivo de tarea (-1 estrella disponible)",
+            title="Selecciona tu hoja o archivo de tarea (-1 estrella cada 3 ejercicios)",
             filetypes=[
                 ("Archivos de tarea", "*.txt *.pdf *.docx *.csv *.md"),
                 ("Todos los archivos", "*.*"),
@@ -1001,7 +1031,7 @@ class VentanaPrincipalHaru(ctk.CTk):
         )
         self.lbl_pista.configure(
             text=(
-                f"  Archivo adjunto: «{doc.nombre_archivo}». "
+                f"  Archivo adjunto: «{doc.nombre_archivo}» (1 ⭐ = 3 ejercicios). "
                 "Escribe qué ejercicio quieres que te explique y presiona Enviar (o envía directo)."
             ),
             image=icono_ctk("file_text", self.tema["btn_green"], 16),
@@ -1272,7 +1302,11 @@ class VentanaPrincipalHaru(ctk.CTk):
 
         self.card_semaforo.configure(fg_color=t["card_bg"], border_color=t["card_border"])
         self.lbl_tit_semaforo.configure(text_color=t["text_primary"])
-        self.lbl_sub_semaforo.configure(text_color=t["text_secondary"])
+        self.lbl_sub_semaforo.configure(
+            text=" Guía Visual",
+            text_color=t["text_secondary"],
+            image=icono_ctk("eye", t["text_secondary"], 14),
+        )
         self._dibujar_leds_semaforo()
 
         self.card_paso.configure(fg_color=t["card_bg"], border_color=t["card_border"])
@@ -1282,10 +1316,7 @@ class VentanaPrincipalHaru(ctk.CTk):
         self.marco_input_ia.configure(fg_color=t["input_bg"], border_color=t["input_border"])
         self.entry_ia.configure(text_color=t["text_primary"])
         self.btn_enviar_ia.configure(fg_color=t["btn_stage_pill"], hover_color=t["btn_stage_pill_hover"])
-        if self._documento_adjunto_pendiente is not None:
-            self.btn_adjuntar_ia.configure(fg_color=t["btn_green"], hover_color=t["btn_green_hover"])
-        else:
-            self.btn_adjuntar_ia.configure(fg_color=t["btn_purple"], hover_color=t["btn_purple_hover"])
+        self._actualizar_indicador_documento_activo()
 
         self.card_pista.configure(fg_color=t["hint_bg"], border_color=t["hint_border"])
         self.lbl_pista.configure(text_color=t["text_primary"])
@@ -1321,8 +1352,8 @@ class VentanaPrincipalHaru(ctk.CTk):
             elif tipo == "leds_cambio":
                 self._leds_estado = list(d.get("leds", [False, False, False]))
                 self.lbl_sub_semaforo.configure(
-                    text=" Simulación" if self.hardware.en_simulacion else f" {self.hardware.puerto_actual}",
-                    image=icono_ctk("cpu", self.tema["text_secondary"], 14),
+                    text=" Guía Visual",
+                    image=icono_ctk("eye", self.tema["text_secondary"], 14),
                 )
                 self._dibujar_leds_semaforo()
 
@@ -1408,6 +1439,7 @@ class VentanaPrincipalHaru(ctk.CTk):
                 )
                 if not self.escenario_haru.hablando_activo and self.escenario_haru.estado == EscenarioCentralHaru.ESTADO_PENSANDO:
                     self.escenario_haru.actualizar_estado(EscenarioCentralHaru.ESTADO_IDLE)
+                self._actualizar_indicador_documento_activo()
 
             elif tipo == "ia_pista_lista":
                 self.btn_enviar_ia.configure(state="normal")
@@ -1419,6 +1451,7 @@ class VentanaPrincipalHaru(ctk.CTk):
                 )
                 if not self.escenario_haru.hablando_activo and self.escenario_haru.estado == EscenarioCentralHaru.ESTADO_PENSANDO:
                     self.escenario_haru.actualizar_estado(EscenarioCentralHaru.ESTADO_IDLE)
+                self._actualizar_indicador_documento_activo()
 
             elif tipo == "stt_inicio":
                 self.btn_hablar.configure(text="Escuchando...", fg_color="#dc2626")

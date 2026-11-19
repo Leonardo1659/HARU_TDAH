@@ -21,7 +21,7 @@ from core.ia.motor_ia import MotorIAHaru, _limpiar_respuesta_ia
 from core.motor_tdah import MotorTDAH
 from core.repositorio_db import RepositorioTDAH
 from core.voz.tts import calcular_visema_fonetico
-from hardware.control_leds import ControladorHardwareLEDs
+from core.semaforo_visual import ControladorHardwareLEDs, ControladorSemaforoVisual
 from ui.avatar_sprite import REQUISITOS_SKIN, EscenarioCentralHaru, _renderizar_haru_3d
 from ui.karaoke import SubtitulosKaraoke
 from ui.modales import ModalAlbumPremios
@@ -835,6 +835,869 @@ class TestAuditoriaIntegralHaru(unittest.TestCase):
             escenario.detener_animacion()
         finally:
             root.destroy()
+
+    # =========================================================================
+    # 9. R1: SEMÁFORO VISUAL NATIVO, PERFIL PEDAGÓGICO E INACTIVIDAD CONFIGURABLE
+    # =========================================================================
+    def test_14_r1_semaforo_visual_perfil_pedagogico_e_inactividad_panel_docente(self):
+        import contextlib
+        import io
+        from hardware.control_leds import ControladorHardwareLEDs as LegacyHardwareLEDs
+
+        # 1) Reubicación a core/semaforo_visual.py, alias legado y ausencia de carpeta hardware/
+        self.assertIs(ControladorHardwareLEDs, ControladorSemaforoVisual)
+        self.assertIs(LegacyHardwareLEDs, ControladorSemaforoVisual)
+        raiz_repo = Path(__file__).resolve().parent.parent
+        self.assertFalse(
+            (raiz_repo / "hardware").exists(),
+            "El directorio legado 'hardware/' no debe existir en el repositorio.",
+        )
+
+        # 2) Cero salida de consola '[Hardware] No se detectó placa Arduino'
+        buf_out = io.StringIO()
+        buf_err = io.StringIO()
+        with contextlib.redirect_stdout(buf_out), contextlib.redirect_stderr(buf_err):
+            sem = ControladorSemaforoVisual()
+            self.assertTrue(sem.en_simulacion)
+            self.assertEqual(sem.puerto_actual, "Guía Visual")
+            self.assertEqual(sem.listar_puertos_disponibles(), [])
+            sem.actualizar_progreso(1, 3)
+            self.assertEqual(sem.estado_leds, [True, False, False])
+            sem.actualizar_progreso(2, 3)
+            self.assertEqual(sem.estado_leds, [True, True, False])
+            sem.celebrar_victoria()
+            self.assertEqual(sem.estado_leds, [True, True, True])
+            sem.apagar_todo()
+            self.assertEqual(sem.estado_leds, [False, False, False])
+        self.assertNotIn("No se detectó placa Arduino", buf_out.getvalue() + buf_err.getvalue())
+
+        # 3) Panel Docente Pestaña 4 ("4. Seguridad y Perfil"), Perfil Pedagógico y Aviso de Inactividad
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            panel = PanelDocente(
+                root,
+                motor_tdah=self.motor,
+                repositorio_db=self.db,
+                motor_ia=self.ia,
+                controlador_hardware=self.hw,
+                tema=TEMAS["CALMA"],
+            )
+            panel.withdraw()
+
+            # Verificar pestaña 4 renombrada y sin combo_com de Arduino
+            self.assertEqual(panel._botones_nav["seguridad"].cget("text").strip(), "4. Seguridad y Perfil")
+            panel.mostrar_seccion("seguridad")
+            root.update_idletasks()
+            self.assertFalse(hasattr(panel, "combo_com"))
+            self.assertTrue(hasattr(panel, "ent_nombre_estudiante"))
+            self.assertTrue(hasattr(panel, "combo_grado_primaria"))
+            self.assertTrue(hasattr(panel, "btn_guardar_perfil_estudiante"))
+
+            # Guardar Perfil Pedagógico del Estudiante
+            panel.ent_nombre_estudiante.delete(0, "end")
+            panel.ent_nombre_estudiante.insert(0, "Mateo")
+            panel.combo_grado_primaria.set("2.° de Primaria")
+            panel._guardar_perfil_estudiante()
+
+            self.assertEqual(self.db.obtener_preferencia("nombre_estudiante"), "Mateo")
+            self.assertEqual(self.db.obtener_preferencia("grado_primaria"), "2.° de Primaria")
+            self.assertEqual(self.ia.nombre_estudiante, "Mateo")
+            self.assertEqual(self.ia.grado_primaria, "2.° de Primaria")
+
+            # Botones de prueba en vivo del Semáforo Visual (Inicio, Avance, Meta, Apagar)
+            self.assertEqual(set(panel.botones_semaforo_visual.keys()), {"Inicio", "Avance", "Meta", "Apagar"})
+            panel.botones_semaforo_visual["Inicio"].invoke()
+            self.assertEqual(self.hw.estado_leds, [True, False, False])
+            panel.botones_semaforo_visual["Avance"].invoke()
+            self.assertEqual(self.hw.estado_leds, [True, True, False])
+            panel.botones_semaforo_visual["Meta"].invoke()
+            self.assertEqual(self.hw.estado_leds, [True, True, True])
+            panel.botones_semaforo_visual["Apagar"].invoke()
+            self.assertEqual(self.hw.estado_leds, [False, False, False])
+
+            # Pestaña 3 ("voz_ia"): Aviso Inactividad (min) configurable y persistente
+            panel.mostrar_seccion("voz_ia")
+            root.update_idletasks()
+            self.assertTrue(hasattr(panel, "ent_inactividad"))
+            panel.ent_foco.delete(0, "end")
+            panel.ent_foco.insert(0, "12")
+            panel.ent_pausa.delete(0, "end")
+            panel.ent_pausa.insert(0, "3")
+            panel.ent_max_desc.delete(0, "end")
+            panel.ent_max_desc.insert(0, "4")
+            panel.ent_inactividad.delete(0, "end")
+            panel.ent_inactividad.insert(0, "5")
+            panel._aplicar_tiempos()
+
+            self.assertEqual(self.motor.tiempo_foco, 12 * 60)
+            self.assertEqual(self.motor.tiempo_pausa, 3 * 60)
+            self.assertEqual(self.motor.max_descansos_por_tarea, 4)
+            self.assertEqual(self.motor.umbral_inactividad_seg, 5 * 60)
+            self.assertEqual(self.db.obtener_preferencia("min_inactividad_nudge"), "5")
+
+            # Preset Pomodoro también restaura aviso de inactividad (por defecto 3 min)
+            panel._cargar_preset_pomodoro(10, 2, 2, "Equilibrado")
+            self.assertEqual(self.motor.umbral_inactividad_seg, 3 * 60)
+            self.assertEqual(self.db.obtener_preferencia("min_inactividad_nudge"), "3")
+
+            panel.cerrar_panel()
+        finally:
+            root.destroy()
+
+    # =========================================================================
+    # 10. R2: CALCULADORA ARITMÉTICA SEGURA AST (PALABRAS, PROBLEMAS Y GUARDAS)
+    # =========================================================================
+    def test_15_r2_calculadora_ast_palabras_decimales_problemas_verbales_y_guardas(self):
+        # 1) Números en palabras hasta 999,999 (centenas y miles)
+        self.assertIn("120", resolver_pregunta_matematica("¿Cuánto es cien más veinte?") or "")
+        self.assertIn("325", resolver_pregunta_matematica("¿Cuánto es ciento veinte más doscientos cinco?") or "")
+        self.assertIn("1500", resolver_pregunta_matematica("¿Cuánto es mil más quinientos?") or "")
+        self.assertIn("2500", resolver_pregunta_matematica("¿Cuánto es dos mil más quinientos?") or "")
+        self.assertIn("100000", resolver_pregunta_matematica("¿Cuánto es cincuenta mil por dos?") or "")
+
+        # 2) Decimales con coma/punto, negativos, potencias, porcentajes y operadores prefijo anidados
+        self.assertIn("6", resolver_pregunta_matematica("¿Cuánto es 3,5 más 2,5?") or "")
+        self.assertIn("-2", resolver_pregunta_matematica("Calcula -5 + 3") or "")
+        self.assertIn("25", resolver_pregunta_matematica("¿Cuánto es 5 al cuadrado?") or "")
+        self.assertIn("8", resolver_pregunta_matematica("¿Cuánto es 2 al cubo?") or "")
+        self.assertIn("81", resolver_pregunta_matematica("¿Cuánto es 3 elevado a 4?") or "")
+        self.assertIn("30", resolver_pregunta_matematica("¿Cuánto es el 20% de 150?") or "")
+        self.assertIn("40", resolver_pregunta_matematica("¿Cuánto es 50 por ciento de 80?") or "")
+        self.assertIn("0.5", resolver_pregunta_matematica("Calcula 20% + 30%") or "")
+        self.assertIn("2", resolver_pregunta_matematica("¿Cuánto es la mitad de la mitad de 8?") or "")
+        self.assertIn("14", resolver_pregunta_matematica("¿Cuánto es el doble de (3 + 4)?") or "")
+        self.assertIn("300", resolver_pregunta_matematica("¿Cuánto es el triple de 10 al cuadrado?") or "")
+        self.assertIn("14", resolver_pregunta_matematica("Calcula 2(3 + 4)") or "")
+        self.assertIn("25", resolver_pregunta_matematica("Calcula (2 + 3)(4 + 1)") or "")
+
+        # 3) Problemas verbales de primaria (suma, resta, multiplicación, reparto)
+        self.assertIn("17", resolver_pregunta_matematica("Tenía 12 manzanas y me regalaron 5, ¿cuántas tengo en total?") or "")
+        self.assertIn("14", resolver_pregunta_matematica("Tenía 20 caramelos y regalé 6, ¿cuántos quedan?") or "")
+        self.assertIn("24", resolver_pregunta_matematica("Compré 4 cajas con 6 colores cada caja, ¿cuántos hay?") or "")
+        self.assertIn("4", resolver_pregunta_matematica("Repartí 24 galletas entre 6 amigos en partes iguales") or "")
+
+        # 4) Guardas contra falsos positivos (conceptuales, narrativos, fechas, ecuaciones, variables)
+        for no_calculo in (
+            "¿Qué es una fracción como 1/2?",
+            "¿Por qué 2 + 2 es 4?",
+            "¿Cuál es la diferencia entre 1/2 y 1/4?",
+            "¿Cuántos cuartos hay en 1/2?",
+            "Dibuja 1/2 de un círculo en tu hoja",
+            "Necesito 3/4 de taza de harina para la receta",
+            "Tengo un 15% de descuento en la tienda",
+            "El 12-10-2026 estudiamos la gestión 2024-2025",
+            "Lee las páginas 10-15 del libro",
+            "¿Es verdad que 2 + 2 = 4?",
+            "1 + 2 = 3",
+            "Resuelve 1 + 2 + x",
+            "Calcula sin(3 + 4)",
+        ):
+            self.assertIsNone(
+                resolver_pregunta_matematica(no_calculo),
+                f"No debió interceptarse como cálculo directo: {no_calculo}",
+            )
+
+        # 5) Mensajes pedagógicos amigables ante división por cero, fuera de rango y dominio no real
+        r_cero = resolver_pregunta_matematica("¿Cuánto es 15 dividido entre 0?") or ""
+        self.assertIn("dividir entre cero", r_cero.lower())
+
+        r_rango = resolver_pregunta_matematica("¿Cuánto es 10 elevado a 12?") or ""
+        self.assertIn("rango seguro de primaria", r_rango.lower())
+
+        r_complejo = resolver_pregunta_matematica("Calcula (-4) ** 0.5") or ""
+        self.assertIn("números reales", r_complejo.lower())
+
+    # =========================================================================
+    # 11. R3: MOTOR IA (PERFIL, MULTI-TURNO, EMPATÍA, ORTOGRAFÍA, GUARDIÁN, DOCS)
+    # =========================================================================
+    def test_16_r3_motor_ia_perfil_memoria_multiturno_empatia_ortografia_guardian_y_documentos(self):
+        self.ia._ollama_check_ts = 9e12
+        self.ia._ollama_modelo_cache = None
+
+        # 1) Adaptación al Perfil Pedagógico (nombre_estudiante, grado_primaria)
+        self.ia.actualizar_perfil_estudiante("Lucía", "1.° de Primaria")
+        perfil = self.ia.recargar_perfil_estudiante()
+        self.assertEqual(perfil["nombre_estudiante"], "Lucía")
+        self.assertEqual(perfil["grado_primaria"], "1.° de Primaria")
+        self.assertEqual(perfil["nombre"], "Lucía")
+        self.assertEqual(perfil["grado"], "1.° de Primaria")
+
+        sys_prompt_1 = self.ia._construir_system_prompt()
+        self.assertIn("Lucía", sys_prompt_1)
+        self.assertIn("1.° de Primaria", sys_prompt_1)
+        self.assertIn("6 a 7 años", sys_prompt_1)
+
+        r_saludo = self.ia.responder_consulta_escolar("¡Hola!")
+        self.assertIn("Lucía", r_saludo)
+        r_ciencias_1 = self.ia.responder_consulta_escolar("fotosíntesis")
+        self.assertIn("Lucía", r_ciencias_1)
+        self.assertIn("1.° de Primaria", r_ciencias_1)
+
+        self.ia.actualizar_perfil_estudiante("Mateo", "6.° de Primaria")
+        sys_prompt_6 = self.ia._construir_system_prompt()
+        self.assertIn("Mateo", sys_prompt_6)
+        self.assertIn("6.° de Primaria", sys_prompt_6)
+        self.assertIn("10 a 11 años", sys_prompt_6)
+        r_ciencias_6 = self.ia.responder_consulta_escolar("fotosíntesis")
+        self.assertIn("6.° de Primaria", r_ciencias_6)
+
+        # Limpiar perfil para las siguientes pruebas
+        self.ia.actualizar_perfil_estudiante("", "")
+
+        # 2) Memoria conversacional multi-turno (_historial_chat, seguimiento matemático y reformulación)
+        self.ia._historial_chat.clear()
+        self.ia._ultimo_resultado_num = None
+
+        r_m1 = self.ia.responder_consulta_escolar("¿Cuánto es 10 + 5?")
+        self.assertIn("15", r_m1)
+        self.assertEqual(self.ia._historial_chat[-1][2], 15)
+
+        r_m2 = self.ia.responder_consulta_escolar("¿y si le sumo 2?")
+        self.assertIn("17", r_m2)
+        self.assertEqual(self.ia._historial_chat[-1][2], 17)
+
+        r_m3 = self.ia.responder_consulta_escolar("¿y más 5?")
+        self.assertIn("22", r_m3)
+        self.assertEqual(self.ia._historial_chat[-1][2], 22)
+
+        r_m4 = self.ia.responder_consulta_escolar("¿y la mitad?")
+        self.assertIn("11", r_m4)
+        self.assertEqual(self.ia._historial_chat[-1][2], 11)
+
+        r_reform = self.ia.responder_consulta_escolar("no entendí, explícame otra vez")
+        self.assertEqual(self.ia.ultima_fuente, "Andamiaje Multi-Turno Haru")
+        self.assertIn("11", r_reform)
+
+        # 3) Detección prioritaria de negaciones y empatía emocional (sin exigir 'como' o 'consejo')
+        for frase_emocional in (
+            "no estoy feliz",
+            "me fue mal",
+            "estoy triste",
+            "soy tonto",
+            "no me sale",
+            "estoy frustrado",
+            "no puedo",
+        ):
+            resp_emo = self.ia.responder_consulta_escolar(frase_emocional)
+            self.assertEqual(
+                self.ia.ultima_fuente,
+                "Apoyo Emocional Haru",
+                f"Falló detección emocional prioritaria para: {frase_emocional}",
+            )
+            self.assertNotIn("celebramos nuestros logros", resp_emo.lower())
+
+        # En SQLite, 'no estoy feliz' jamás debe devolver la respuesta positiva de 'feliz'
+        resp_db_no_feliz = self.db.buscar_conocimiento("no estoy feliz") or ""
+        self.assertIn("no sentirse feliz", resp_db_no_feliz.lower())
+        self.assertIsNone(self.db.buscar_conocimiento("no quiero un chiste"))
+
+        # 4) Ortografía y jerga infantil (_normalizar_ortografia_infantil)
+        norm_fn = self.ia._normalizar_ortografia_infantil
+        self.assertEqual(norm_fn("q ora es"), "que hora es")
+        self.assertEqual(norm_fn("ola"), "hola")
+        self.assertEqual(norm_fn("berbo"), "verbo")
+        self.assertEqual(norm_fn("fotosintecis"), "fotosintesis")
+        self.assertEqual(norm_fn("fracion"), "fraccion")
+        self.assertEqual(norm_fn("xfa"), "por favor")
+        self.assertEqual(norm_fn("xq"), "porque")
+
+        self.assertRegex(self.ia.responder_consulta_escolar("q ora es xfa"), r"\d{2}:\d{2}")
+        self.assertIn("acción", self.ia.responder_consulta_escolar("berbo").lower())
+
+        # 5) Filtro Guardián contextual (permite consultas académicas, protege en bullying y bloquea evasiones)
+        for consulta_academica_legitima in (
+            "reproducción sexual y asexual de las plantas",
+            "cuento del beso a la rana",
+            "ligar sílabas",
+            "pelearon por la independencia",
+            "efectos del alcohol en el cuerpo humano",
+            "cómo evitar distraerme con TikTok o Roblox mientras estudio",
+        ):
+            resp_leg = self.ia.responder_consulta_escolar(consulta_academica_legitima)
+            self.assertNotEqual(
+                self.ia.ultima_fuente,
+                "Filtro Guardián Infantil",
+                f"No debió bloquear consulta legítima: {consulta_academica_legitima}",
+            )
+            self.assertTrue(len(resp_leg) > 20)
+
+        for reporte_bullying in (
+            "me quieren golpear en el recreo",
+            "me pegan en el colegio",
+            "me hacen bullying",
+        ):
+            resp_prot = self.ia.responder_consulta_escolar(reporte_bullying)
+            self.assertEqual(self.ia.ultima_fuente, "Protocolo de Protección Infantil")
+            self.assertTrue(
+                any(w in resp_prot.lower() for w in ("profesor", "familia", "adulto", "mamá", "papá")),
+                f"Falta orientación protectora en: {resp_prot}",
+            )
+
+        for evasion_inapropiada in ("fr33 fir3", "n o v i a", "f r e e f i r e"):
+            _ = self.ia.responder_consulta_escolar(evasion_inapropiada)
+            self.assertEqual(
+                self.ia.ultima_fuente,
+                "Filtro Guardián Infantil",
+                f"Debió bloquear evasión: {evasion_inapropiada}",
+            )
+
+        # 6) Preservar operadores matemáticos en _limpiar_respuesta_ia
+        limpio_op = _limpiar_respuesta_ia("### Multiplica **3 * 4** = 12 en `tu cuaderno`")
+        self.assertNotIn("**", limpio_op)
+        self.assertNotIn("###", limpio_op)
+        self.assertNotIn("`", limpio_op)
+        self.assertIn("3 * 4", limpio_op)
+
+        # 7) Lectura exacta de documentos, precedencia, auto-clasificación y pistas graduadas
+        doc_ejercicios = (
+            "Guía de Práctica — Fecha: 12-10-2026 (Gestión 2024-2025)\n"
+            "Problema 1: Calcula 3,5 + 2,5 en tu cuaderno.\n"
+            "Problema 2: Resuelve la operación combinada 2 + 3 * 4 = 14.\n"
+            "Problema 3: Calcula 50 - 18 paso a paso.\n"
+        )
+        bloque_1 = self.ia._extraer_bloque_ejercicio_documento(doc_ejercicios, "ayúdame con el problema 1")
+        self.assertIn("3,5 + 2,5", bloque_1)
+        self.assertNotIn("Problema 2", bloque_1)
+
+        bloque_ult = self.ia._extraer_bloque_ejercicio_documento(doc_ejercicios, "explícame el último")
+        self.assertIn("50 - 18", bloque_ult)
+        self.assertNotIn("Problema 1", bloque_ult)
+
+        ops_doc = self.ia._analizar_operaciones_en_texto(doc_ejercicios)
+        valores_ops = [val for _etq, val, _exp in ops_doc]
+        self.assertIn(6, valores_ops)
+        self.assertIn(14, valores_ops)
+        self.assertIn(32, valores_ops)
+        # Las fechas 12-10-2026 y 2024-2025 NO deben evaluarse como restas (-2024 ni -1)
+        self.assertNotIn(-2024, valores_ops)
+        self.assertNotIn(-1, valores_ops)
+
+        self.assertNotEqual(self.ia.detectar_modulo_automatico("La red trófica y alimentaria de los seres vivos"), "Inglés")
+        self.assertEqual(self.ia.detectar_modulo_automatico("Perimetro de un triangulo y un rectangulo"), "Matemáticas")
+        self.assertEqual(self.ia.detectar_modulo_automatico("Historia de la independencia de Bolivia"), "Ciencias")
+
+        pasos_tablas, _ = self.ia.descomponer_tarea_ia("Tablas del 7 y 8")
+        self.assertTrue(any("7 × 8" in p for p in pasos_tablas))
+        self.assertTrue(any("56" in p for p in pasos_tablas))
+
+        p1 = self.ia.generar_pista_contextual("Matemáticas", "Suma 15 + 7 en tu cuaderno", 1)
+        p2 = self.ia.generar_pista_contextual("Matemáticas", "Suma 15 + 7 en tu cuaderno", 1)
+        p3 = self.ia.generar_pista_contextual("Matemáticas", "Suma 15 + 7 en tu cuaderno", 1)
+        self.assertEqual(len({p1, p2, p3}), 3, "Las pistas sucesivas para el mismo paso deben ser graduadas y distintas.")
+
+    # =========================================================================
+    # 12. R4: COMPROBACIÓN ACTIVA (DECIMALES, PALABRAS, INGLÉS Y DIAGNÓSTICO)
+    # =========================================================================
+    def test_17_r4_comprobacion_activa_operadores_equivalencias_negaciones_ingles_y_diagnostico_progresivo(self):
+        from core.comprobacion_activa import generar_reto_paso, validar_respuesta_reto
+
+        # 1) Operadores × y ÷, decimales (. y ,), 4+ cifras, multi-término, palabras hasta 1000+, equivalencias y negativos
+        reto_mul = generar_reto_paso("Resuelve la multiplicación 8 × 4 en tu cuaderno.", 2)
+        self.assertEqual(reto_mul["respuesta_principal"], "32")
+        self.assertTrue(validar_respuesta_reto(reto_mul, "32")[0])
+        self.assertTrue(validar_respuesta_reto(reto_mul, "treinta y dos")[0])
+
+        reto_div = generar_reto_paso("Calcula la división 20 ÷ 4.", 2)
+        self.assertEqual(reto_div["respuesta_principal"], "5")
+        self.assertTrue(validar_respuesta_reto(reto_div, "cinco")[0])
+
+        reto_dec = generar_reto_paso("Calcula 0,25 + 0,25 en tu cuaderno.", 2)
+        self.assertEqual(reto_dec["respuesta_principal"], "0.5")
+        for eq in ("0.5", "0,5", "1/2", "50%", "un medio"):
+            self.assertTrue(validar_respuesta_reto(reto_dec, eq)[0], f"Debió aceptar equivalencia '{eq}'")
+
+        reto_miles = generar_reto_paso("Suma 1000 + 200 en tu cuaderno.", 2)
+        self.assertEqual(reto_miles["respuesta_principal"], "1200")
+        self.assertTrue(validar_respuesta_reto(reto_miles, "mil doscientos")[0])
+        self.assertTrue(validar_respuesta_reto(reto_miles, "1200")[0])
+
+        reto_multi = generar_reto_paso("Resuelve 15 + 7 - 2 = 20 en tu hoja.", 2)
+        self.assertEqual(reto_multi["respuesta_principal"], "20")
+        self.assertTrue(validar_respuesta_reto(reto_multi, "veinte")[0])
+
+        reto_neg = generar_reto_paso("Calcula 3 - 8 en la recta numérica.", 2)
+        self.assertEqual(reto_neg["respuesta_principal"], "-5")
+        self.assertEqual(len(set(reto_neg["opciones"])), 3)
+        self.assertTrue(validar_respuesta_reto(reto_neg, "-5")[0])
+        self.assertTrue(validar_respuesta_reto(reto_neg, "menos cinco")[0])
+
+        reto_cero = generar_reto_paso("Calcula 5 - 5 en tu cuaderno.", 2)
+        self.assertEqual(reto_cero["respuesta_principal"], "0")
+        self.assertEqual(len(set(reto_cero["opciones"])), 3)
+
+        # 2) Robustez ante división por cero y entradas None / int
+        reto_div0 = generar_reto_paso("Intenta calcular 10 ÷ 0.", 2)
+        self.assertIsInstance(reto_div0, dict)
+        self.assertEqual(len(reto_div0["opciones"]), 3)
+        self.assertIsInstance(generar_reto_paso(None, None, None), dict)
+        self.assertIsInstance(generar_reto_paso(12345, "invalido"), dict)
+        self.assertFalse(validar_respuesta_reto(reto_mul, None)[0])
+        self.assertTrue(validar_respuesta_reto(reto_mul, 32)[0])
+        self.assertFalse(validar_respuesta_reto(None, "32")[0])
+
+        # 3) Validación numérica exacta (rechaza texto parcial sin el resultado o expresión sin calcular)
+        self.assertFalse(validar_respuesta_reto(reto_mul, "suma unidades")[0])
+        self.assertFalse(validar_respuesta_reto(reto_mul, "8 × 4")[0])
+        self.assertFalse(validar_respuesta_reto(reto_mul, "99")[0])
+
+        # 4) Rechazo de negaciones y frases ajenas en cualquier tipo de reto (incluido lectura)
+        reto_lec = generar_reto_paso("Lee en voz alta el cuento del bosque.", 2)
+        for respuesta_invalida in (
+            "no saqué mi cuaderno",
+            "no leí el cuento",
+            "no entiendo",
+            "no sé cómo hacerlo",
+            "no lo hice",
+            "todavía no",
+            "fui al baño",
+            "tengo hambre",
+        ):
+            self.assertFalse(
+                validar_respuesta_reto(reto_lec, respuesta_invalida)[0],
+                f"Debió rechazar negación/frase ajena: '{respuesta_invalida}'",
+            )
+
+        # 5) Límites de palabra \b ('accion' vs 'fracción'), vocabulario de inglés ampliado y diagnóstico progresivo
+        reto_accion = generar_reto_paso("Identifica la acción principal en tu oración.", 2, "Lenguaje")
+        self.assertNotIn("fracción", reto_accion["pregunta"].lower())
+        self.assertIn("verbo", reto_accion["pregunta"].lower())
+
+        reto_dog = generar_reto_paso("Aprende cómo se dice perro en inglés: DOG.", 2, "Inglés")
+        self.assertEqual(reto_dog["tipo"], "ingles")
+        self.assertEqual(reto_dog["respuesta_principal"], "DOG")
+        self.assertTrue(validar_respuesta_reto(reto_dog, "DOG")[0])
+        self.assertFalse(validar_respuesta_reto(reto_dog, "perro")[0])
+
+        reto_apple = generar_reto_paso("Dibuja una manzana y escribe APPLE en inglés.", 2, "Inglés")
+        self.assertEqual(reto_apple["tipo"], "ingles")
+        self.assertTrue(validar_respuesta_reto(reto_apple, "apple")[0])
+
+        # Retroalimentación diagnóstica progresiva (intentos 1, 2, 3+ automáticos y reinicio al acertar)
+        reto_prog = generar_reto_paso("Calcula 14 + 6 en tu cuaderno.", 2)
+        ok1, msg1 = validar_respuesta_reto(reto_prog, "11")
+        ok2, msg2 = validar_respuesta_reto(reto_prog, "12")
+        ok3, msg3 = validar_respuesta_reto(reto_prog, "13")
+        self.assertFalse(ok1)
+        self.assertFalse(ok2)
+        self.assertFalse(ok3)
+        self.assertIn("intento 2", msg2.lower())
+        self.assertIn("intento 3", msg3.lower())
+        self.assertIn("20", msg3)
+        self.assertEqual(len({msg1, msg2, msg3}), 3)
+
+        # Al responder correctamente se reinicia el contador de intentos fallidos
+        self.assertTrue(validar_respuesta_reto(reto_prog, "20")[0])
+        self.assertEqual(reto_prog.get("_intentos_fallidos"), 0)
+
+    # =========================================================================
+    # 13. PANEL DOCENTE: ESTADO LED DE OLLAMA Y BARRA DE CARGA EN DOCUMENTOS
+    # =========================================================================
+    def test_18_panel_docente_ollama_led_y_barra_carga_documento(self):
+        import io as _io
+        import json as _json
+        import tempfile
+        import time as _time
+        import urllib.request
+        from unittest.mock import patch
+
+        from core.archivos_estudio import cargar_archivo_estudio
+        from ui.panel_docente import PanelDocente
+        from ui.theme import TEMAS
+
+        class _FakeResp:
+            def __init__(self, payload: bytes):
+                self._buf = _io.BytesIO(payload)
+
+            def read(self) -> bytes:
+                return self._buf.read()
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+        # 1) MotorIAHaru.obtener_info_ollama conectado y preferencia de modelo local
+        payload_ok = _json.dumps(
+            {"models": [{"name": "qwen2.5:3b"}, {"name": "llama3.2:1b"}]}
+        ).encode("utf-8")
+        with patch.object(urllib.request, "urlopen", return_value=_FakeResp(payload_ok)):
+            info_ok = self.ia.obtener_info_ollama(forzar=True)
+        self.assertTrue(info_ok["conectado"])
+        self.assertEqual(info_ok["modelo_activo"], "qwen2.5:3b")
+        self.assertEqual(info_ok["modelos_disponibles"], ["qwen2.5:3b", "llama3.2:1b"])
+
+        self.ia.configurar_modelo_ollama("llama3.2:1b")
+        self.assertEqual(self.db.obtener_preferencia("modelo_ollama"), "llama3.2:1b")
+        with patch.object(urllib.request, "urlopen", return_value=_FakeResp(payload_ok)):
+            info_pref = self.ia.obtener_info_ollama(forzar=True)
+        self.assertEqual(info_pref["modelo_activo"], "llama3.2:1b")
+
+        # 2) Documento de prueba y verificación de callback on_progreso monótono
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ruta_doc = os.path.join(tmpdir, "guia_progreso_prueba.txt")
+            contenido_doc = (
+                "# Tema 1: Sumas Rápidas\n"
+                "Resuelve en tu cuaderno 12 + 8 y 25 + 15 paso a paso.\n\n"
+                "# Tema 2: English Vocabulary\n"
+                "Practice the words RED, BLUE, CAT and DOG in English aloud.\n"
+            )
+            Path(ruta_doc).write_text(contenido_doc, encoding="utf-8")
+            doc = cargar_archivo_estudio(ruta_doc)
+            self.assertTrue(doc.exito)
+
+            eventos_prog = []
+            propuestas = self.ia.extraer_tareas_de_documento(
+                doc,
+                on_progreso=lambda frac, msg: eventos_prog.append((frac, msg)),
+            )
+            self.assertGreaterEqual(len(propuestas), 2)
+            self.assertGreaterEqual(len(eventos_prog), 3)
+            valores_p = [f for f, _m in eventos_prog]
+            self.assertTrue(all(0.0 < v <= 1.0 for v in valores_p))
+            self.assertEqual(valores_p, sorted(valores_p))
+
+            # 3) PanelDocente UI: LED verde/rojo Ollama en _vista_voz_ia y barra de carga async en _vista_misiones
+            self.ia._ollama_check_ts = 9e12  # evitar sondeo real no mockeado al abrir UI
+            root = tk.Tk()
+            root.withdraw()
+            try:
+                panel = PanelDocente(
+                    root,
+                    motor_tdah=self.motor,
+                    repositorio_db=self.db,
+                    motor_ia=self.ia,
+                    controlador_hardware=self.hw,
+                    tema=TEMAS["CALMA"],
+                )
+                panel.withdraw()
+
+                # Sección Misiones: widgets de barra de progreso presentes y procesamiento async
+                self.assertTrue(hasattr(panel, "panel_progreso_doc"))
+                self.assertTrue(hasattr(panel, "barra_progreso_doc"))
+                self.assertTrue(hasattr(panel, "lbl_progreso_doc"))
+
+                resultado_async = {"listo": False, "tareas": None}
+                max_progreso_visto = {"val": 0.0}
+
+                def _al_terminar(tareas):
+                    resultado_async["tareas"] = tareas
+                    resultado_async["listo"] = True
+
+                panel.procesar_archivo_pensum_async(
+                    ruta_doc,
+                    abrir_modal=False,
+                    on_completado=_al_terminar,
+                )
+                t0 = _time.time()
+                while not resultado_async["listo"] and (_time.time() - t0) < 10.0:
+                    root.update()
+                    try:
+                        max_progreso_visto["val"] = max(
+                            max_progreso_visto["val"], float(panel.barra_progreso_doc.get())
+                        )
+                    except Exception:
+                        pass
+                    _time.sleep(0.02)
+
+                self.assertTrue(resultado_async["listo"], "El procesamiento asíncrono de documento debe completar sin bloquear.")
+                self.assertGreaterEqual(len(resultado_async["tareas"] or []), 2)
+                self.assertGreaterEqual(max_progreso_visto["val"], 0.99)
+                self.assertEqual(panel.btn_subir_archivo.cget("state"), "normal")
+
+                # Sección Voz e IA: tarjeta Ollama con LED verde/rojo y modelo conectado
+                self.ia._ollama_check_ts = 9e12
+                self.ia._ollama_modelo_cache = "llama3.2:1b"
+                self.ia._ollama_modelos_disponibles = ["qwen2.5:3b", "llama3.2:1b"]
+                panel.mostrar_seccion("voz_ia")
+                root.update_idletasks()
+                for attr in ("led_ollama", "lbl_ollama_estado", "lbl_ollama_modelo", "combo_modelo_ollama", "btn_refrescar_ollama"):
+                    self.assertTrue(hasattr(panel, attr), f"Falta el widget '{attr}' en PanelDocente.")
+
+                self.assertEqual(panel.led_ollama.cget("fg_color"), "#22c55e")
+                self.assertIn("Conectado", panel.lbl_ollama_estado.cget("text"))
+                self.assertIn("llama3.2:1b", panel.lbl_ollama_modelo.cget("text"))
+
+                # Selector de modelo cambia preferencia y actualiza etiqueta
+                panel._seleccionar_modelo_ollama("qwen2.5:3b")
+                self.assertEqual(self.db.obtener_preferencia("modelo_ollama"), "qwen2.5:3b")
+                self.assertIn("qwen2.5:3b", panel.lbl_ollama_modelo.cget("text"))
+
+                # Cambiar a estado desconectado y verificar LED rojo
+                with patch.object(urllib.request, "urlopen", side_effect=OSError("sin conexion")):
+                    info_off = self.ia.obtener_info_ollama(forzar=True)
+                self.assertFalse(info_off["conectado"])
+                panel._aplicar_estado_ollama_ui(info_off)
+                self.assertEqual(panel.led_ollama.cget("fg_color"), "#ef4444")
+                self.assertIn("Desconectado", panel.lbl_ollama_estado.cget("text"))
+            finally:
+                try:
+                    panel.cerrar_panel()
+                except Exception:
+                    pass
+                try:
+                    root.destroy()
+                except Exception:
+                    pass
+
+    # =========================================================================
+    # 14. DOCUMENTOS DEL ALUMNO: 30 EJERCICIOS, MEMORIA MULTI-TURNO Y PRECISIÓN
+    # =========================================================================
+    def test_19_documento_alumno_30_ejercicios_memoria_navegacion_y_precision(self):
+        import tempfile
+        from unittest.mock import patch
+
+        from core.archivos_estudio import _leer_pdf_fallback_nativo, cargar_archivo_estudio
+
+        self.ia._ollama_check_ts = 9e12
+        self.ia._ollama_modelo_cache = None
+
+        # 1) PDF mínimo con texto puro numérico sin letras para probar fallback nativo y pypdf
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ruta_pdf = os.path.join(tmpdir, "mate_pura.pdf")
+            stream_pdf = b"BT\n/F1 12 Tf\n72 720 Td\n(1. 15 + 7 =) Tj\n0 -20 Td\n(2. 24 / 6 =) Tj\nET\n"
+            pdf_bytes = (
+                b"%PDF-1.4\n"
+                b"1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n"
+                b"2 0 obj<</Type/Pages/Count 1/Kids[3 0 R]>>endobj\n"
+                b"3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Contents 4 0 R/Resources<</Font<</F1 5 0 R>>>>>>endobj\n"
+                b"4 0 obj<</Length " + str(len(stream_pdf)).encode("ascii") + b">>stream\n"
+                + stream_pdf
+                + b"endstream\nendobj\n"
+                b"5 0 obj<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>endobj\n"
+                b"xref\n0 6\n0000000000 65535 f \n0000000009 00000 n \n0000000054 00000 n \n0000000105 00000 n \n0000000222 00000 n \n0000000355 00000 n \n"
+                b"trailer<</Size 6/Root 1 0 R>>\nstartxref\n425\n%%EOF\n"
+            )
+            Path(ruta_pdf).write_bytes(pdf_bytes)
+
+            txt_fallback = _leer_pdf_fallback_nativo(Path(ruta_pdf))
+            self.assertIn("1. 15 + 7 =", txt_fallback)
+            self.assertIn("2. 24 / 6 =", txt_fallback)
+
+            doc_pdf = cargar_archivo_estudio(ruta_pdf)
+            self.assertTrue(doc_pdf.exito)
+            self.assertIn("15 + 7", doc_pdf.texto_completo)
+            self.assertIn("24 / 6", doc_pdf.texto_completo)
+
+        # 2) Documento completo con 30 ejercicios y formatos numéricos exigentes
+        lineas_guia = [
+            "Guía Práctica de Matemática — Fecha: 12-10-2026",
+            "1. 15 + 7 =",
+            "2) 3,5 + 2,5 =",
+            "3.- -5 + 8 =",
+            "4- 20 ÷ 4 =",
+            "5. 2 + 3 * 4 =",
+            "6. Ana tiene 24 caramelos y los reparte entre 6 amigos, ¿cuántos le tocan?",
+            "7. ¿Cuánto es el 15% de 80?",
+        ]
+        for i in range(8, 30):
+            lineas_guia.append(f"{i}. Calcula {i} + 10 =")
+        lineas_guia.append("30. Calcula 9 × 8")
+        texto_30 = "\n".join(lineas_guia)
+
+        enc, ejs = self.ia._parsear_ejercicios_documento(texto_30)
+        self.assertIn("Guía Práctica", enc)
+        self.assertEqual(len(ejs), 30, f"Debió detectar exactamente 30 ejercicios, halló {len(ejs)}")
+
+        # 3) Verificar limpieza de prefijos y cálculos exactos (sin falsos negativos como 13 o -1)
+        ops_3 = self.ia._analizar_operaciones_en_texto("3.- -5 + 8 =")
+        self.assertTrue(ops_3)
+        self.assertEqual(ops_3[0][1], 3)
+
+        ops_4 = self.ia._analizar_operaciones_en_texto("4- 20 ÷ 4 =")
+        self.assertTrue(ops_4)
+        self.assertEqual(ops_4[0][1], 5)
+
+        ops_5 = self.ia._analizar_operaciones_en_texto("5. 2 + 3 * 4 =")
+        self.assertTrue(ops_5)
+        self.assertEqual(ops_5[0][1], 14)
+
+        ops_6 = self.ia._analizar_operaciones_en_texto(
+            "6. Ana tiene 24 caramelos y los reparte entre 6 amigos, ¿cuántos le tocan?"
+        )
+        self.assertTrue(ops_6)
+        self.assertEqual(ops_6[0][1], 4)
+
+        ops_7 = self.ia._analizar_operaciones_en_texto("7. ¿Cuánto es el 15% de 80?")
+        self.assertTrue(ops_7)
+        self.assertEqual(ops_7[0][1], 12)
+
+        # 4) Conversación multi-turno continua SIN volver a adjuntar el documento
+        with patch.object(self.ia, "_llamar_gemini", return_value=None):
+            r_ini = self.ia.responder_sobre_documento(texto_30, pregunta="", nombre_doc="guia_30.pdf")
+            self.assertIn("30 ejercicios", r_ini)
+            self.assertIn("22", r_ini)
+
+            info_act = self.motor.obtener_info_documento_activo()
+            self.assertIsNotNone(info_act)
+            self.assertEqual(info_act["total_ejercicios"], 30)
+            self.assertEqual(info_act["ejercicio_actual"], 1)
+
+            # Preguntar por "los otros ejercicios" NO debe irse a reposo de misión
+            r_otros = self.ia.responder_consulta_escolar(
+                "¿me puedes explicar los otros ejercicios?",
+                modo_charla_libre=True,
+            )
+            self.assertNotIn("Toca Empezar Misión", r_otros)
+            self.assertIn("6", r_otros)
+            self.assertIn("3", r_otros)
+            self.assertIn("5", r_otros)
+            self.assertEqual(self.ia.obtener_documento_activo()["ejercicio_actual"], 4)
+
+            # "siguiente" avanza al 5 (2 + 3 * 4 = 14)
+            r_sig = self.ia.responder_consulta_escolar("siguiente", modo_charla_libre=True)
+            self.assertIn("5/30", r_sig)
+            self.assertIn("14", r_sig)
+
+            # Salto directo al 30
+            r_30 = self.ia.responder_consulta_escolar("ejercicio 30", modo_charla_libre=True)
+            self.assertIn("30/30", r_30)
+            self.assertIn("72", r_30)
+
+            # Rango "del 10 al 12"
+            r_rango = self.ia.responder_consulta_escolar("del 10 al 12", modo_charla_libre=True)
+            self.assertIn("20", r_rango)
+            self.assertIn("21", r_rango)
+            self.assertIn("22", r_rango)
+            self.assertEqual(self.ia.obtener_documento_activo()["ejercicio_actual"], 12)
+
+            # Cantidad total
+            r_cnt = self.ia.responder_consulta_escolar("cuántos ejercicios hay en el archivo")
+            self.assertIn("30 ejercicios", r_cnt)
+
+            # Pregunta externa ("qué hora es") NO cierra ni borra el documento activo
+            r_hora = self.ia.responder_consulta_escolar("qué hora es")
+            self.assertIn(":", r_hora)
+            self.assertIsNotNone(self.ia.obtener_documento_activo())
+
+            # Tras preguntar la hora, "siguiente" retoma el ejercicio 13 (13 + 10 = 23)
+            r_13 = self.ia.responder_consulta_escolar("siguiente")
+            self.assertIn("13/30", r_13)
+            self.assertIn("23", r_13)
+
+            # Cerrar archivo limpia el estado activo
+            r_cerrar = self.ia.responder_consulta_escolar("cerrar archivo")
+            self.assertIsNone(self.ia.obtener_documento_activo())
+            self.assertIn("Cerré", r_cerrar)
+
+        # 5) Barrera anti-alucinación: si un LLM devuelve un resultado falso (99), AST lo rechaza y corrige a 22
+        with patch.object(self.ia, "_llamar_gemini", return_value="El resultado de 15 + 7 es 99."):
+            r_guard = self.ia.responder_sobre_documento(texto_30, pregunta="ejercicio 1", nombre_doc="guia_30.pdf")
+        self.assertIn("22", r_guard)
+        self.assertNotIn("99", r_guard)
+
+    # =========================================================================
+    # 15. ECONOMÍA EN DOCUMENTOS: 1 ESTRELLA CADA 3 EJERCICIOS ÚNICOS
+    # =========================================================================
+    def test_20_cobro_una_estrella_cada_tres_ejercicios_documento(self):
+        import time as _time
+        from unittest.mock import patch
+
+        self.ia._ollama_check_ts = 9e12
+        self.ia._ollama_modelo_cache = None
+        self.ia.cerrar_documento_activo()
+
+        # Ajustar saldo disponible inicial exactamente a 2 estrellas
+        saldo_act = self.db.obtener_estrellas_disponibles()
+        if saldo_act > 2:
+            ok_aj, saldo_act = self.db.consumir_estrellas_ayuda(saldo_act - 2, "Ajuste test pack 3")
+            self.assertTrue(ok_aj)
+        elif saldo_act < 2:
+            self.db.sumar_estrellas(2 - saldo_act)
+        self.assertEqual(self.db.obtener_estrellas_disponibles(), 2)
+
+        lineas = [f"{i}. Calcula {i * 10} + 1 =" for i in range(1, 10)]
+        texto_9 = "\n".join(lineas)
+
+        with patch.object(self.ia, "_llamar_gemini", return_value=None):
+            # Ejercicio 1 -> cobra 1 estrella y desbloquea cupo de 3 ejercicios (quedan 2 libres)
+            r1 = self.ia.responder_sobre_documento(
+                texto_9, pregunta="", nombre_doc="pack3.txt", cobrar_estrellas=True
+            )
+            self.assertIn("11", r1)
+            self.assertEqual(self.db.obtener_estrellas_disponibles(), 1)
+            self.assertEqual(self.ia.ultimo_cobro_documento["estrellas"], 1)
+            info1 = self.ia.obtener_documento_activo()
+            self.assertEqual(info1["ejercicios_explicados"], 1)
+            self.assertEqual(info1["ejercicios_desbloqueados"], 3)
+            self.assertEqual(info1["ejercicios_restantes_pack"], 2)
+
+            # Ejercicio 2 y 3 -> gratis dentro del primer pack
+            r2 = self.ia.responder_consulta_escolar("siguiente")
+            self.assertIn("21", r2)
+            self.assertIsNone(self.ia.ultimo_cobro_documento)
+            self.assertEqual(self.db.obtener_estrellas_disponibles(), 1)
+
+            r3 = self.ia.responder_consulta_escolar("siguiente")
+            self.assertIn("31", r3)
+            self.assertIsNone(self.ia.ultimo_cobro_documento)
+            self.assertEqual(self.db.obtener_estrellas_disponibles(), 1)
+
+            # Repetir ejercicio 3 ("no entendí") y resumen ("cuántos ejercicios") -> 0 estrellas
+            _ = self.ia.responder_consulta_escolar("no entendí")
+            _ = self.ia.responder_consulta_escolar("cuántos ejercicios hay")
+            self.assertEqual(self.db.obtener_estrellas_disponibles(), 1)
+
+            # Ejercicio 4 -> cobra la 2da estrella y desbloquea cupos hasta 6
+            r4 = self.ia.responder_consulta_escolar("siguiente")
+            self.assertIn("41", r4)
+            self.assertEqual(self.db.obtener_estrellas_disponibles(), 0)
+            self.assertEqual(self.ia.ultimo_cobro_documento["estrellas"], 1)
+            self.assertEqual(self.ia.obtener_documento_activo()["ejercicios_desbloqueados"], 6)
+
+            # "los otros ejercicios" pide 5, 6 y 7 pero solo quedan 2 cupos libres (5 y 6) y 0 estrellas:
+            # debe explicar 5 y 6 SIN revelar la respuesta del 7 (71), y avisar que necesita 1 estrella
+            r_56 = self.ia.responder_consulta_escolar("los otros ejercicios")
+            self.assertIn("51", r_56)
+            self.assertIn("61", r_56)
+            self.assertNotIn("71", r_56)
+            self.assertIn("estrella", r_56.lower())
+            self.assertEqual(self.db.obtener_estrellas_disponibles(), 0)
+            self.assertEqual(self.ia.obtener_documento_activo()["ejercicio_actual"], 6)
+
+            # Intentar avanzar al 7 sin estrellas ni cupos -> bloqueo amable sin explicar el 7
+            r_bloq = self.ia.responder_consulta_escolar("siguiente")
+            self.assertNotIn("71", r_bloq)
+            self.assertIn("3 ejercicios", r_bloq.lower())
+
+            # Tras ganar 1 estrella nueva, "siguiente" desbloquea el 3er pack y explica el ejercicio 7
+            self.db.sumar_estrellas(1)
+            self.assertEqual(self.db.obtener_estrellas_disponibles(), 1)
+            r7 = self.ia.responder_consulta_escolar("siguiente")
+            self.assertIn("71", r7)
+            self.assertEqual(self.db.obtener_estrellas_disponibles(), 0)
+            self.assertEqual(self.ia.obtener_documento_activo()["ejercicios_desbloqueados"], 9)
+
+            # Verificar coordinación completa MotorTDAH.consultar_documento_async + consultar_ia (cero doble cobro)
+            self.ia.cerrar_documento_activo()
+            self.db.sumar_estrellas(2)
+            self.assertEqual(self.db.obtener_estrellas_disponibles(), 2)
+            self.bus.extraer_pendientes()
+
+            self.motor.consultar_documento_async(
+                texto_9, "pack_motor.txt", pregunta="", consumir_estrella=True
+            )
+            t0 = _time.time()
+            while self.motor._ia_ocupada and (_time.time() - t0) < 5.0:
+                _time.sleep(0.02)
+
+            self.assertEqual(
+                self.db.obtener_estrellas_disponibles(),
+                1,
+                "consultar_documento_async debe cobrar exactamente 1 estrella (sin doble cobro).",
+            )
+            evs = self.bus.extraer_pendientes()
+            resps_ui = [e.datos.get("respuesta", "") for e in evs if e.tipo == "ia_respuesta"]
+            self.assertTrue(any("Pack 3 ejercicios" in r for r in resps_ui))
+
+            # Pasos 2 y 3 gratuitos por consultar_ia, paso 4 cobra la 2da estrella
+            self.motor.consultar_ia("siguiente")
+            self.assertEqual(self.db.obtener_estrellas_disponibles(), 1)
+            self.motor.consultar_ia("siguiente")
+            self.assertEqual(self.db.obtener_estrellas_disponibles(), 1)
+            self.motor.consultar_ia("siguiente")
+            self.assertEqual(self.db.obtener_estrellas_disponibles(), 0)
 
 
 if __name__ == "__main__":

@@ -8,7 +8,7 @@ Comprueba en segundos el estado real de cada módulo:
 - Micrófono sin compiladores (`sounddevice` + `SpeechRecognition`)
 - IA en Capas (`ast` seguro, SQLite, Ollama local y llamada real a Gemini API)
 - Base de Datos SQLite WAL + Seguridad PIN PBKDF2
-- Hardware Serial Arduino UNO R3 (`pyserial`)
+- Semáforo Visual Pedagógico Nativo (`core.semaforo_visual`)
 """
 
 import argparse
@@ -45,7 +45,6 @@ def ejecutar_diagnostico(rapido: bool = False) -> int:
         ("edge_tts", "Voz Neuronal Edge-TTS"),
         ("sounddevice", "Audio Micrófono SoundDevice"),
         ("speech_recognition", "Transcripción SpeechRec"),
-        ("serial", "Comunicación Arduino PySerial"),
         ("cv2", "Visión Cámara OpenCV"),
     ]:
         try:
@@ -59,8 +58,8 @@ def ejecutar_diagnostico(rapido: bool = False) -> int:
     from core.config import AUDIO_PRECARGADO_DIR
     from core.ia import MotorIAHaru, evaluar_ast_seguro
     from core.repositorio_db import RepositorioTDAH
+    from core.semaforo_visual import ControladorHardwareLEDs, ControladorSemaforoVisual
     from core.voz.stt import EscuchaVozHaru
-    from hardware.control_leds import ControladorHardwareLEDs
 
     db = RepositorioTDAH()
     pin_hasheado = bool(db.obtener_preferencia("pin_hash", "")) and not bool(db.obtener_preferencia("pin_docente", ""))
@@ -74,17 +73,16 @@ def ejecutar_diagnostico(rapido: bool = False) -> int:
     kb_voz = sum(p.stat().st_size for p in precargados) / 1024.0
     imprimir_estado("Frases Neuronales Offline", len(precargados) > 0, f"{len(precargados)} audios MP3 ({kb_voz:.1f} KB)")
 
-    # 4. Periféricos locales (Micrófono y Arduino)
+    # 4. Periféricos locales (Micrófono y Semáforo Visual)
     stt = EscuchaVozHaru()
     hay_mic = stt.hay_microfono_disponible()
     imprimir_estado("Micrófono Físico", hay_mic, "Detectado y listo" if hay_mic else "No detectado (usará cuadro de texto)")
 
-    hw = ControladorHardwareLEDs()
-    puertos = hw.listar_puertos_disponibles()
+    hw = ControladorSemaforoVisual()
     imprimir_estado(
-        "Placa Arduino UNO R3",
-        not hw.en_simulacion,
-        f"Conectada en {hw.puerto_actual}" if not hw.en_simulacion else f"Modo Simulación (Puertos COM: {puertos or 'ninguno'})",
+        "Semáforo Visual Pedagógico",
+        hw.en_simulacion and hw.puerto_actual == "Guía Visual",
+        f"Activo ({hw.puerto_actual})",
     )
     hw.cerrar()
 

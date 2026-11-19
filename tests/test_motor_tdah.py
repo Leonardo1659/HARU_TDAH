@@ -26,7 +26,7 @@ from core.ia_asistente import MotorIAHaru
 from core.motor_tdah import MotorTDAH
 from core.repositorio_db import RepositorioTDAH
 from core.voz.tts import MotorVozHaru, estimar_marcas_proporcionales, limpiar_texto_para_voz
-from hardware.control_leds import ControladorHardwareLEDs
+from core.semaforo_visual import ControladorHardwareLEDs, ControladorSemaforoVisual
 from tools.empaquetar_zip import crear_paquete_zip
 
 
@@ -214,6 +214,173 @@ class TestHaruProyectoIntegrador(unittest.TestCase):
             self.assertFalse(any(n.endswith(".db") for n in nombres))
             self.assertTrue(any(n.endswith(".env.example") for n in nombres))
             self.assertTrue(any(n.endswith("haru.pyw") for n in nombres))
+
+    def test_9_semaforo_visual_nativo_alias_legado_e_inactividad_configurable(self):
+        import contextlib
+        import io
+        from hardware.control_leds import ControladorHardwareLEDs as LegacyHardwareLEDs
+
+        # 1) Verificar reubicación a core/semaforo_visual.py, alias legado y eliminación de carpeta hardware/
+        self.assertIs(ControladorHardwareLEDs, ControladorSemaforoVisual)
+        self.assertIs(LegacyHardwareLEDs, ControladorSemaforoVisual)
+        raiz_repo = Path(__file__).resolve().parent.parent
+        self.assertFalse(
+            (raiz_repo / "hardware").exists(),
+            "El directorio legado 'hardware/' no debe existir en disco tras la reestructuración a core/semaforo_visual.py.",
+        )
+
+        # 2) Cero salida en consola de '[Hardware] No se detectó placa Arduino'
+        buf_out = io.StringIO()
+        buf_err = io.StringIO()
+        eventos_gui = []
+        with contextlib.redirect_stdout(buf_out), contextlib.redirect_stderr(buf_err):
+            sem = ControladorSemaforoVisual(callback_gui=lambda leds, ev: eventos_gui.append((leds, ev)))
+            self.assertTrue(sem.en_simulacion)
+            self.assertEqual(sem.puerto_actual, "Guía Visual")
+            self.assertEqual(sem.listar_puertos_disponibles(), [])
+            self.assertTrue(sem.conectar("COM15"))
+
+            sem.actualizar_progreso(1, 3)
+            self.assertEqual(sem.estado_leds, [True, False, False])
+            self.assertEqual(sem.ultimo_comando, "P1")
+
+            sem.actualizar_progreso(2, 3)
+            self.assertEqual(sem.estado_leds, [True, True, False])
+            self.assertEqual(sem.ultimo_comando, "P2")
+
+            sem.celebrar_victoria()
+            self.assertEqual(sem.estado_leds, [True, True, True])
+            self.assertEqual(sem.ultimo_comando, "WIN")
+
+            sem.activar_pausa()
+            self.assertEqual(sem.estado_leds, [False, True, False])
+            self.assertEqual(sem.ultimo_comando, "PAUSA")
+
+            sem.cerrar()
+            self.assertEqual(sem.estado_leds, [False, False, False])
+            self.assertEqual(sem.ultimo_comando, "OFF")
+
+        salida_total = buf_out.getvalue() + buf_err.getvalue()
+        self.assertNotIn("No se detectó placa Arduino", salida_total)
+        self.assertNotIn("[Hardware]", salida_total)
+        self.assertGreaterEqual(len(eventos_gui), 5)
+
+        # 3) Aviso de inactividad configurable (min_inactividad_nudge) en MotorTDAH
+        self.assertEqual(self.motor.umbral_inactividad_seg, 3 * 60)
+        self.motor.configurar_tiempos_personalizados(12, 3, max_descansos=4, min_inactividad=5)
+        self.assertEqual(self.motor.umbral_inactividad_seg, 5 * 60)
+        self.assertEqual(self.db.obtener_preferencia("min_inactividad_nudge"), "5")
+
+        # Desactivar aviso con 0 minutos y verificar persistencia al reabrir
+        self.motor.configurar_tiempos_personalizados(10, 2, max_descansos=2, min_inactividad=0)
+        self.assertEqual(self.motor.umbral_inactividad_seg, 0)
+        self.assertEqual(self.db.obtener_preferencia("min_inactividad_nudge"), "0")
+
+        motor_reabierto = MotorTDAH(repositorio_db=self.db, motor_ia=self.ia)
+        self.assertEqual(motor_reabierto.umbral_inactividad_seg, 0)
+
+        # Clamping seguro de rango 0..30
+        self.motor.configurar_tiempos_personalizados(10, 2, min_inactividad=99)
+        self.assertEqual(self.motor.umbral_inactividad_seg, 30 * 60)
+        self.motor.configurar_tiempos_personalizados(10, 2, min_inactividad=-5)
+        self.assertEqual(self.motor.umbral_inactividad_seg, 0)
+
+    def test_10_concurrencia_sqlite_memoria_preferencias_corruptas_y_validaciones(self):
+        import threading
+
+        # 1) Base de datos en memoria (:memory:) reutiliza la misma conexión y cierra limpiamente
+        db_mem = RepositorioTDAH(db_path=":memory:")
+        try:
+            self.assertEqual(db_mem.obtener_estrellas(), 5)
+            self.assertGreaterEqual(len(db_mem.listar_tareas()), 5)
+            db_mem.sumar_estrellas(4)
+            self.assertEqual(db_mem.obtener_estrellas(), 9)
+        finally:
+            db_mem.cerrar()
+
+        # 2) Concurrencia multihilo atómica con BEGIN IMMEDIATE (sumar_estrellas y canjear_recompensa)
+        errores_hilos = []
+
+        def _sumador():
+            try:
+                for _ in range(4):
+                    self.db.sumar_estrellas(1)
+            except Exception as exc:
+                errores_hilos.append(exc)
+
+        hilos = [threading.Thread(target=_sumador) for _ in range(10)]
+        for h in hilos:
+            h.start()
+        for h in hilos:
+            h.join()
+        self.assertEqual(errores_hilos, [])
+        # 5 iniciales + (10 hilos * 4 estrellas) = 45 estrellas exactas sin pérdida de actualizaciones
+        self.assertEqual(self.db.obtener_estrellas(), 45)
+
+        # Ahora dejar solo 10 estrellas disponibles y lanzar 8 hilos intentando canjear un premio de 6 estrellas:
+        # solo 1 hilo debe lograr el canje (porque 10 - 6 = 4 < 6), jamás saldo negativo
+        self.db.guardar_preferencia("estrellas_totales", "10")
+        self.db.guardar_preferencia("estrellas_gastadas", "0")
+        premio_6 = next(r for r in self.db.listar_recompensas_catalogo() if r["costo_estrellas"] == 6)
+        resultados_canje = []
+
+        def _canjeador():
+            try:
+                ok, _m, _d = self.db.canjear_recompensa(premio_6["id"])
+                resultados_canje.append(ok)
+            except Exception as exc:
+                errores_hilos.append(exc)
+
+        hilos_c = [threading.Thread(target=_canjeador) for _ in range(8)]
+        for h in hilos_c:
+            h.start()
+        for h in hilos_c:
+            h.join()
+        self.assertEqual(errores_hilos, [])
+        self.assertEqual(resultados_canje.count(True), 1)
+        self.assertEqual(self.db.obtener_estrellas_disponibles(), 4)
+
+        # 3) Resiliencia ante preferencias corruptas en perfil_progreso y límites inválidos
+        self.db.guardar_preferencia("estrellas_totales", "corrupto_xyz")
+        self.db.guardar_preferencia("estrellas_gastadas", "no_num")
+        self.db.guardar_preferencia("tareas_completadas", "invalido")
+        self.db.guardar_preferencia("pin_bloqueado_hasta", "no_float")
+        self.assertEqual(self.db.obtener_estrellas(), 5)
+        self.assertEqual(self.db.obtener_estrellas_disponibles(), 5)
+        self.assertEqual(self.db.esta_pin_bloqueado(), (False, 0))
+        resumen = self.db.obtener_estadisticas_resumen()
+        self.assertEqual(resumen["estrellas_totales"], 5)
+        self.assertEqual(resumen["tareas_completadas"], 0)
+
+        self.assertIsInstance(self.db.obtener_historial_sesiones(limite=-10), list)
+        self.assertIsInstance(self.db.obtener_bitacora_descansos(limite=0), list)
+        self.assertIsInstance(self.db.obtener_historial_canjes(limite="invalido"), list)
+        self.assertIsInstance(self.db.obtener_auditoria_eventos(limite=None), list)
+
+        # 4) Validación estricta de entradas en cambiar_pin_docente, guardar_tarea y recompensas
+        for pin_invalido in ("12a4", "123", "1234567", "", None, "１２３４"):
+            self.assertFalse(self.db.cambiar_pin_docente(pin_invalido))
+        self.assertTrue(self.db.cambiar_pin_docente("2468"))
+        self.assertTrue(self.db.verificar_pin_docente("2468"))
+
+        with self.assertRaises(ValueError):
+            self.db.guardar_tarea("", ["Paso válido"])
+        with self.assertRaises(ValueError):
+            self.db.guardar_tarea("Tarea sin pasos", [])
+        with self.assertRaises(ValueError):
+            self.db.guardar_tarea("Tarea pasos vacíos", ["   "])
+        with self.assertRaises(ValueError):
+            self.db.guardar_tarea("Tarea paso no string", [123])
+
+        self.assertFalse(self.db.agregar_recompensa_catalogo("", 10))
+        self.assertFalse(self.db.agregar_recompensa_catalogo("Premio inválido", 0))
+        self.assertFalse(self.db.agregar_recompensa_catalogo("Premio negativo", -5))
+        self.assertFalse(self.db.agregar_recompensa_catalogo("Premio bool", True))
+        self.assertFalse(self.db.agregar_recompensa_catalogo("Premio texto", "gratis"))
+        self.assertFalse(self.db.canjear_recompensa(True)[0])
+        self.assertFalse(self.db.canjear_recompensa(-1)[0])
+        self.assertFalse(self.db.eliminar_recompensa_catalogo(False))
+        self.assertFalse(self.db.consumir_estrellas_ayuda(0)[0])
 
 
 if __name__ == "__main__":
