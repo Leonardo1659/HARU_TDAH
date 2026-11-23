@@ -806,7 +806,6 @@ class RepositorioTDAH:
                 "modo_privado": "0",
                 "voz_tts": "es-BO-SofiaNeural",
                 "velocidad_tts": "+0%",
-                "puerto_arduino": "COM15",
                 "pin_intentos_fallidos": "0",
                 "pin_bloqueado_hasta": "0",
                 "pin_personalizado": "0",

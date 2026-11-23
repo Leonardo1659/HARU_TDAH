@@ -6,7 +6,7 @@ Implementa fielmente el diseño unificado con:
 - Haru 3D animado en el centro del escenario y camino de aventura hacia el cofre.
 - Subtítulos interactivos tipo karaoke palabra por palabra debajo de Haru.
 - Tarjeta de reloj Micro-Pomodoro + Descanso controlado arriba a la izquierda.
-- Insignia de misión, puntos/trofeos, acceso Docente/Familia y Semáforo Arduino a la derecha.
+- Insignia de misión, puntos/trofeos, acceso Docente/Familia y Semáforo Visual nativo a la derecha.
 - Barra inferior con `Hablar`, `Anterior`, gran botón central `¡Paso Listo! (+1)`,
   `Pista Mágica`, `Repetir`, `Reiniciar` y `Reto Colores` integrado.
 - Bus reactivo `BusEventosUI` (`after(35)`) para seguridad total multihilo.
@@ -703,7 +703,7 @@ class VentanaPrincipalHaru(ctk.CTk):
         self.btn_reiniciar.pack(side="left", padx=(4, 0))
 
     # =========================================================================
-    # SEMÁFORO DE 3 LEDs ARDUINO UNO R3 (INICIO, AVANCE, META)
+    # SEMÁFORO VISUAL PEDAGÓGICO NATIVO DE 3 LUCES (INICIO, AVANCE, META)
     # =========================================================================
     def _dibujar_leds_semaforo(self) -> None:
         self.canvas_leds.delete("all")

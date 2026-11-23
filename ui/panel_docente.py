@@ -3,9 +3,9 @@ Panel Docente y Familiar Intuitivo en CustomTkinter — Asistente TDAH "Haru"
 Universidad Salesiana de Bolivia - Proyecto Integrador
 
 Diseñado con navegación lateral clara y distribución espaciosa en 4 módulos:
-1. Misiones y Pasos: Constructor visual tarjeta por tarjeta + Descomponedor IA.
+1. Misiones y Pasos: Constructor visual tarjeta por tarjeta, ingesta asíncrona de documentos con barra de progreso y Descomponedor IA.
 2. Progreso y Descansos: KPIs, gráfico visual de foco/pausas, bitácora y exportación CSV/HTML.
-3. Voz, Reloj e IA: Selector de voces neuronales (Bolivia/Latam), Pomodoro, Comprobación Activa, Modo Privado y Gemini.
+3. Voz, Reloj e IA: Selector de voces neuronales (Bolivia/Latam), Pomodoro, recordatorio de inactividad configurable, Comprobación Activa, Ollama Local con LED/selector, Modo Privado y Gemini.
 4. Seguridad y Perfil: Cambio de PIN cifrado (PBKDF2), Perfil Pedagógico del Estudiante, Semáforo Visual y marco legal.
 """
 
@@ -2245,6 +2245,12 @@ class PanelDocente(ctk.CTkToplevel):
         self.notificar(f"Perfil pedagógico guardado: {nombre or 'Estudiante'} ({grado}).")
 
     def _vista_seguridad_arduino(self) -> None:
+        """Vista 4: Seguridad (PIN PBKDF2), Perfil Pedagógico y Semáforo Visual.
+
+        Nota: el nombre del método se conserva como alias compatible con la
+        suite de pruebas heredada tras reemplazar el hardware físico por el
+        Semáforo Visual nativo.
+        """
         marco = ctk.CTkScrollableFrame(self.contenedor, fg_color="transparent")
         marco.grid(row=0, column=0, sticky="nsew")
         marco.grid_columnconfigure((0, 1), weight=1)
