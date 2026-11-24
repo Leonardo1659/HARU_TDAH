@@ -45,8 +45,14 @@ class PanelDocente(ctk.CTkToplevel):
         self.tema = tema or TEMAS["CALMA"]
 
         self.title("Panel Docente y Familiar — Gestión Pedagógica Haru (TDAH)")
-        self.geometry("1160x720")
-        self.minsize(980, 620)
+        scr_w = self.winfo_screenwidth()
+        scr_h = self.winfo_screenheight()
+        ancho_win = min(1460, max(1240, scr_w - 48))
+        alto_win = min(860, max(720, scr_h - 76))
+        pos_x = max(0, (scr_w - ancho_win) // 2)
+        pos_y = max(0, (scr_h - alto_win - 36) // 2)
+        self.geometry(f"{ancho_win}x{alto_win}+{pos_x}+{pos_y}")
+        self.minsize(1120, 660)
         self.configure(fg_color=self.tema["bg_stage"])
         self.transient(parent)
         self.protocol("WM_DELETE_WINDOW", self.cerrar_panel)
@@ -293,7 +299,7 @@ class PanelDocente(ctk.CTkToplevel):
     def _vista_misiones(self) -> None:
         marco = ctk.CTkFrame(self.contenedor, fg_color="transparent")
         marco.grid(row=0, column=0, sticky="nsew")
-        marco.grid_columnconfigure(0, weight=0, minsize=255)
+        marco.grid_columnconfigure(0, weight=0, minsize=275)
         marco.grid_columnconfigure(1, weight=1)
         marco.grid_rowconfigure(0, weight=0)
         marco.grid_rowconfigure(1, weight=0)
@@ -318,11 +324,7 @@ class PanelDocente(ctk.CTkToplevel):
             text_color=self.tema["text_primary"],
         ).pack(side="left", padx=(12, 6), pady=8)
 
-        self.contenedor_pills_modulos = ctk.CTkFrame(barra_modulos, fg_color="transparent")
-        self.contenedor_pills_modulos.pack(side="left", fill="x", expand=True, pady=6)
-        self._botones_modulo = {}
-        self._refrescar_barra_modulos()
-
+        # Se empaca primero el botón derecho para garantizar que nunca desaparezca al achicar la ventana
         self.btn_subir_archivo = ctk.CTkButton(
             barra_modulos,
             text="Subir Archivo / Pensum",
@@ -332,11 +334,16 @@ class PanelDocente(ctk.CTkToplevel):
             hover_color=self.tema["btn_purple_hover"],
             corner_radius=14,
             height=34,
-            width=192,
+            width=176,
             font=ctk.CTkFont(size=12, weight="bold"),
             command=self._accion_subir_archivo_pensum,
         )
-        self.btn_subir_archivo.pack(side="right", padx=12, pady=6)
+        self.btn_subir_archivo.pack(side="right", padx=(6, 12), pady=6)
+
+        self.contenedor_pills_modulos = ctk.CTkFrame(barra_modulos, fg_color="transparent")
+        self.contenedor_pills_modulos.pack(side="left", fill="x", expand=True, pady=6)
+        self._botones_modulo = {}
+        self._refrescar_barra_modulos()
 
         # Barra de carga visible para procesamiento de archivo / pensum
         self.panel_progreso_doc = ctk.CTkFrame(
@@ -468,7 +475,9 @@ class PanelDocente(ctk.CTkToplevel):
             font=ctk.CTkFont(size=12, weight="bold"),
             text_color=self.tema["text_primary"],
             anchor="w",
-        ).grid(row=0, column=0, columnspan=3, sticky="w", padx=12, pady=(8, 4))
+            justify="left",
+            wraplength=680,
+        ).grid(row=0, column=0, columnspan=3, sticky="ew", padx=12, pady=(8, 4))
 
         self.entry_tema_ia = ctk.CTkEntry(
             caja_ia,
@@ -637,9 +646,11 @@ class PanelDocente(ctk.CTkToplevel):
 
         for clave_mod, texto_btn in opciones:
             activo = self.modulo_activo == clave_mod
+            ancho_pill = max(48, len(texto_btn) * 6 + 16)
             btn = ctk.CTkButton(
                 self.contenedor_pills_modulos,
                 text=texto_btn,
+                width=ancho_pill,
                 height=30,
                 corner_radius=12,
                 fg_color=self.tema["btn_green"] if activo else self.tema["btn_stage_pill"],
@@ -647,7 +658,7 @@ class PanelDocente(ctk.CTkToplevel):
                 font=ctk.CTkFont(size=11, weight="bold"),
                 command=lambda m=clave_mod: self.seleccionar_modulo_curricular(m, cargar_primera=True),
             )
-            btn.pack(side="left", padx=3)
+            btn.pack(side="left", padx=2)
             self._botones_modulo[clave_mod] = btn
 
     def seleccionar_modulo_curricular(self, modulo: str, cargar_primera: bool = True) -> None:

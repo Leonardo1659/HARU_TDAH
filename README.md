@@ -90,6 +90,7 @@ flowchart TD
 * **Sincronización Labial Fonética:** 6 visemas bucales sincronizados con el habla y subtítulos tipo karaoke palabra por palabra.
 * **10 Comportamientos Situacionales y 4 Trajes Desbloqueables:** Reacciones dinámicas (`IDLE`, `SALUDANDO`, `HABLANDO`, `ESCUCHANDO`, `PENSANDO`, `PASO_LOGRADO`, `CELEBRANDO`, `RESPIRANDO`, `PAUSA` y `COSQUILLAS`) y evolución visual (*Robot Kawaii*, *Gatito Espacial*, *Osito Tutor* y *Súper Haru Dorado*).
 * **Semáforo Visual Pedagógico Nativo:** Indicador de 3 luces integrado en pantalla (*Inicio*, *Avance*, *Meta*) controlado desde `core/semaforo_visual.py`, sin requerir placas ni cables externos.
+* **Zona de Juegos Cognitivos (`ui/juegos_modal.py`):** Minijuegos integrados (*Tres en Raya* con 3 dificultades/Minimax/pistas y *Memorama* visual de 2 niveles) que entrenan planificación, memoria de trabajo y otorgan `+1 ⭐` al ganar.
 
 ### 5. Panel Docente y Familiar (4 Pestañas)
 Protegido mediante PIN de 4 dígitos derivado con **PBKDF2-HMAC-SHA256** y bloqueo temporal progresivo contra intentos fallidos:
@@ -137,7 +138,7 @@ Haru funciona al 100% sin claves ni internet, pero puedes potenciar las explicac
 # Diagnóstico integral del entorno (módulos, micrófono, voz, base de datos, Ollama y API)
 python tools/diagnostico.py
 
-# Ejecución de la suite completa de pruebas unitarias y de integración (30/30 tests)
+# Ejecución de la suite completa de pruebas unitarias y de integración (31/31 tests)
 python -m unittest discover -s tests -v
 
 # Compilación de Haru.exe autónomo (lanzador nativo C# + Python embebido en dist/Haru/)
@@ -175,12 +176,13 @@ HARU_TDAH/
 │   ├── app.py                       # Ventana principal, filtro de módulos, chat con documentos y Semáforo Visual
 │   ├── avatar_sprite.py             # Renderizador vectorial del avatar 3D y cinemáticas
 │   ├── iconos.py                    # Motor de iconografía vectorial offline y generador SVG
+│   ├── juegos_modal.py              # Zona de Juegos Cognitivos (Tres en Raya y Memorama)
 │   ├── karaoke.py                   # Visualizador de subtítulos sincronizados palabra por palabra
 │   ├── modales.py                   # Diálogos modales (PIN, Álbum, Comprobación y Aprobador de Guías)
 │   ├── panel_docente.py             # Dashboard en 4 pestañas (misiones, reportes, Ollama/voz y perfil/seguridad)
 │   ├── reto_colores_modal.py        # Reto sensorial interactivo con cámara web
 │   └── theme.py                     # Paletas cromáticas ergonómicas (Calma, Día, Noche)
-├── tests/                           # Batería de pruebas automatizadas (30 tests)
+├── tests/                           # Batería de pruebas automatizadas (31 tests)
 │   ├── test_motor_tdah.py           # Pruebas del motor pedagógico, base de datos y semáforo visual
 │   └── test_auditoria_integral.py   # Pruebas integrales de seguridad, IA, documentos, sesiones y UI
 └── tools/                           # Utilidades de compilación, empaquetado y diagnóstico

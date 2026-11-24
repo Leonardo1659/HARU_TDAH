@@ -29,6 +29,7 @@ from core.semaforo_visual import ControladorHardwareLEDs, ControladorSemaforoVis
 from core.voz import EscuchaVozHaru, MotorVozHaru
 from ui.avatar_sprite import REQUISITOS_SKIN, EscenarioCentralHaru
 from ui.iconos import aplicar_icono_ventana_haru, icono_ctk, icono_skin_ctk
+from ui.juegos_modal import ModalMenuJuegos
 from ui.karaoke import SubtitulosKaraoke
 from ui.modales import (
     ModalAlbumPremios,
@@ -92,10 +93,16 @@ class VentanaPrincipalHaru(ctk.CTk):
             bus_eventos=self.bus,
         )
 
-        # Configurar ventana principal estilo tableta horizontal
+        # Configurar ventana principal estilo tableta horizontal (ampliada y centrada)
         self.title("HARU — Asistente Virtual Educativo para Niños de Primaria con TDAH")
-        self.geometry("1180x730")
-        self.minsize(1024, 650)
+        scr_w = self.winfo_screenwidth()
+        scr_h = self.winfo_screenheight()
+        ancho_win = min(1480, max(1240, scr_w - 48))
+        alto_win = min(860, max(730, scr_h - 76))
+        pos_x = max(0, (scr_w - ancho_win) // 2)
+        pos_y = max(0, (scr_h - alto_win - 36) // 2)
+        self.geometry(f"{ancho_win}x{alto_win}+{pos_x}+{pos_y}")
+        self.minsize(1160, 670)
         self.configure(fg_color=self.tema["bg_bezel"])
 
         self._leds_estado = [False, False, False]
@@ -166,7 +173,7 @@ class VentanaPrincipalHaru(ctk.CTk):
             font=ctk.CTkFont(family="Segoe UI", size=30, weight="bold"),
             text_color=self.tema["text_on_stage"],
         )
-        self.lbl_logo.pack(side="left", padx=(2, 14))
+        self.lbl_logo.pack(side="left", padx=(2, 8))
 
         self.btn_tema = ctk.CTkButton(
             izq,
@@ -230,7 +237,7 @@ class VentanaPrincipalHaru(ctk.CTk):
         self.combo_modulo = ctk.CTkOptionMenu(
             self.card_mision_top,
             values=["Todos los Módulos"],
-            width=155,
+            width=142,
             height=32,
             corner_radius=12,
             fg_color=self.tema["btn_purple"],
@@ -243,7 +250,7 @@ class VentanaPrincipalHaru(ctk.CTk):
         self.combo_mision = ctk.CTkOptionMenu(
             self.card_mision_top,
             values=["Matemáticas - Sumas Divertidas"],
-            width=215,
+            width=195,
             height=32,
             corner_radius=12,
             fg_color=self.tema["btn_stage_pill"],
@@ -258,6 +265,7 @@ class VentanaPrincipalHaru(ctk.CTk):
             text="5 Puntos",
             image=icono_ctk("star", self.tema["badge_gold_text"], 16),
             compound="left",
+            width=108,
             height=32,
             corner_radius=14,
             fg_color=self.tema["badge_gold_bg"],
@@ -273,6 +281,7 @@ class VentanaPrincipalHaru(ctk.CTk):
             text="Docente / Familia",
             image=icono_ctk("user", "#ffffff", 16),
             compound="left",
+            width=158,
             height=42,
             corner_radius=18,
             fg_color=self.tema["btn_stage_pill"],
@@ -567,26 +576,44 @@ class VentanaPrincipalHaru(ctk.CTk):
             compound="left",
             font=ctk.CTkFont(size=13, weight="bold"),
             text_color=self.tema["text_primary"],
-            wraplength=470,
+            wraplength=390,
             justify="center",
         )
         self.lbl_pista.pack(fill="x", padx=16, pady=9)
 
-        # Derecha: Botón Magenta Reto Colores
+        # Derecha: Zona de Juegos + Botón Magenta Reto Colores
+        acciones_der = ctk.CTkFrame(fila_media, fg_color="transparent")
+        acciones_der.grid(row=0, column=2, sticky="e", padx=(10, 0))
+
+        self.btn_juegos = ctk.CTkButton(
+            acciones_der,
+            text="Juegos",
+            image=icono_ctk("trophy", "#ffffff", 17),
+            compound="left",
+            fg_color=self.tema["btn_purple"],
+            hover_color=self.tema["btn_purple_hover"],
+            height=44,
+            width=120,
+            corner_radius=22,
+            font=ctk.CTkFont(size=14, weight="bold"),
+            command=self._abrir_zona_juegos,
+        )
+        self.btn_juegos.pack(side="left", padx=(0, 8))
+
         self.btn_reto_colores = ctk.CTkButton(
-            fila_media,
+            acciones_der,
             text="Reto Colores",
             image=icono_ctk("camera", "#ffffff", 17),
             compound="left",
             fg_color=self.tema["btn_magenta"],
             hover_color=self.tema["btn_magenta_hover"],
             height=44,
-            width=185,
+            width=160,
             corner_radius=22,
             font=ctk.CTkFont(size=14, weight="bold"),
             command=self._abrir_reto_colores,
         )
-        self.btn_reto_colores.grid(row=0, column=2, sticky="e", padx=(10, 0))
+        self.btn_reto_colores.pack(side="left")
 
     def _construir_barra_accion_inferior(self) -> None:
         barra = ctk.CTkFrame(self.stage, fg_color="transparent")
@@ -1087,6 +1114,23 @@ class VentanaPrincipalHaru(ctk.CTk):
 
         self._ventana_secundaria = ModalRetoColores(self, tema=self.tema, on_premio=_dar_premio)
 
+    def _abrir_zona_juegos(self) -> None:
+        if self._enfocar_si_abierta(self._ventana_secundaria):
+            return
+
+        def _premiar_victoria():
+            self.motor._otorgar_estrellas(1)
+            self.multimodal.reproducir_sonido_victoria()
+            self.escenario_haru.disparar_reaccion(EscenarioCentralHaru.ESTADO_PASO_LOGRADO, 2.5)
+            self._aplicar_snapshot_motor(self.motor.obtener_snapshot_ui())
+
+        self._ventana_secundaria = ModalMenuJuegos(
+            self,
+            tema=self.tema,
+            funcion_hablar=self.voz.hablar,
+            on_victoria=_premiar_victoria,
+        )
+
     def _abrir_album_premios(self) -> None:
         if self._enfocar_si_abierta(self._ventana_secundaria):
             return
@@ -1320,6 +1364,7 @@ class VentanaPrincipalHaru(ctk.CTk):
 
         self.card_pista.configure(fg_color=t["hint_bg"], border_color=t["hint_border"])
         self.lbl_pista.configure(text_color=t["text_primary"])
+        self.btn_juegos.configure(fg_color=t["btn_purple"], hover_color=t["btn_purple_hover"])
         self.btn_reto_colores.configure(fg_color=t["btn_magenta"], hover_color=t["btn_magenta_hover"])
 
         for btn_sec in (self.btn_hablar, self.btn_anterior, self.btn_repetir, self.btn_reiniciar):

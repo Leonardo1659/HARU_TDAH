@@ -1699,6 +1699,109 @@ class TestAuditoriaIntegralHaru(unittest.TestCase):
             self.motor.consultar_ia("siguiente")
             self.assertEqual(self.db.obtener_estrellas_disponibles(), 0)
 
+    def test_21_zona_juegos_tictactoe_y_memorama(self):
+        """Verifica ModalMenuJuegos, Tres en Raya (anti-farming y dificultades) y Memorama."""
+        import customtkinter as ctk
+        from ui.app import VentanaPrincipalHaru
+        from ui.juegos_modal import ModalMenuJuegos, VentanaMemorama, VentanaTicTacToe
+        from ui.theme import obtener_tema
+
+        self.assertTrue(hasattr(VentanaPrincipalHaru, "_abrir_zona_juegos"))
+        raiz_repo = Path(__file__).resolve().parent.parent
+        app_src = (raiz_repo / "ui" / "app.py").read_text(encoding="utf-8")
+        self.assertIn("btn_juegos", app_src)
+
+        tema = obtener_tema("CALMA")
+        root = ctk.CTk()
+        root.withdraw()
+        try:
+            menu = ModalMenuJuegos(root, tema=tema, funcion_hablar=lambda _t: None)
+            self.assertTrue(menu.winfo_exists())
+            menu.destroy()
+
+            # 1) Tres en Raya: victoria + anti-farming en deshacer + dificultades + pista
+            victorias_ttt = []
+            ttt = VentanaTicTacToe(
+                root,
+                tema=tema,
+                funcion_hablar=lambda _t: None,
+                on_victoria=lambda: victorias_ttt.append(1),
+            )
+            ttt.tablero = ["X", "X", "X", "O", "O", "", "", "", ""]
+            ttt.historial = [[0, 3], [1, 4], [2, None]]
+            self.assertTrue(ttt._verificar_estado("X"))
+            self.assertFalse(ttt.juego_activo)
+            self.assertEqual(len(victorias_ttt), 1)
+
+            # Deshacer tras finalizar ronda debe estar bloqueado (anti-farming)
+            ttt._deshacer_jugada()
+            self.assertFalse(ttt.juego_activo)
+            self.assertEqual(len(victorias_ttt), 1)
+
+            for dif in ("Fácil", "Normal", "Desafío"):
+                ttt._cambiar_dificultad(dif)
+                self.assertEqual(ttt.dificultad, dif)
+                self.assertTrue(ttt.juego_activo)
+            ttt._usar_pista()
+            ttt._cerrar_ventana()
+
+            # 2) Memorama: niveles 6/8 pares, espiar 2s, victoria y cierre seguro
+            victorias_mem = []
+            mem = VentanaMemorama(
+                root,
+                tema=tema,
+                funcion_hablar=lambda _t: None,
+                on_victoria=lambda: victorias_mem.append(1),
+            )
+            self.assertEqual(len(mem.cartas), 12)
+            mem._cambiar_dificultad("Normal")
+            self.assertEqual(len(mem.cartas), 16)
+            mem.update_idletasks()
+            self.assertEqual(mem.resizable(), (True, True))
+            self.assertGreaterEqual(mem.btn_espiar.winfo_reqheight(), 36)
+            self.assertLessEqual(mem.winfo_reqheight(), mem.winfo_height())
+            mem._espiar_tablero()
+            self.assertEqual(mem.espias_disponibles, 0)
+            mem.bloqueado = False
+
+            # Emparejar todas las cartas del tablero Normal
+            indices_por_icono = {}
+            for idx, (icono, _color) in enumerate(mem.cartas):
+                indices_por_icono.setdefault(icono, []).append(idx)
+            for _icono, (i1, i2) in indices_por_icono.items():
+                mem.seleccionadas = [i1, i2]
+                mem._evaluar_pareja()
+
+            self.assertEqual(len(victorias_mem), 1)
+            mem._cerrar_ventana()
+
+            # 3) Panel Docente: pills compactas y botón Subir Archivo sin desbordamiento
+            panel = PanelDocente(
+                root,
+                motor_tdah=self.motor,
+                repositorio_db=self.db,
+                motor_ia=self.ia,
+                controlador_hardware=self.hw,
+                tema=tema,
+            )
+            panel.update()
+            self.assertLess(panel._botones_modulo["Todos"].cget("width"), 140)
+            ancho_total_pills = sum(btn.cget("width") + 4 for btn in panel._botones_modulo.values())
+            self.assertLess(ancho_total_pills, 650)
+            self.assertGreaterEqual(panel.btn_subir_archivo.winfo_reqwidth(), 150)
+            self.assertGreaterEqual(panel.winfo_width(), 1240)
+            self.assertLessEqual(panel.winfo_reqwidth(), panel.winfo_width())
+            panel.cerrar_panel()
+        finally:
+            try:
+                root.update_idletasks()
+            except Exception:
+                pass
+            try:
+                root.destroy()
+            except Exception:
+                pass
+
 
 if __name__ == "__main__":
     unittest.main()
