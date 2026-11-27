@@ -494,6 +494,7 @@ class VentanaPrincipalHaru(ctk.CTk):
         )
         self.lbl_num_paso.pack(anchor="w", padx=16, pady=(14, 8))
 
+        # `wraplength=260` lógico fijo: CTk escala por DPI una sola vez y evita bucles de expansión
         self.lbl_texto_paso = ctk.CTkLabel(
             self.card_paso,
             text="Saca tu cuaderno de matemáticas, tu lápiz y tu borrador sobre la mesa.",
@@ -884,23 +885,21 @@ class VentanaPrincipalHaru(ctk.CTk):
         self.bind("<KeyPress-r>", _al_repetir)
         self.bind("<KeyPress-R>", _al_repetir)
         self.bind("<Escape>", lambda _e: self.voz.detener())
-        self._ultimo_wrap_pista = 0
-        self._ultimo_wrap_paso = 0
+        self._ultimo_wrap_pista = 390
 
         def _ajustar_wrap_pista(e):
-            nuevo = int(round(max(260, e.width - 36) / 24.0) * 24)
+            # Convertir ancho físico de evento `<Configure>` a píxeles lógicos para evitar doble escalado DPI (125%/150%)
+            try:
+                escala = max(0.5, float(self.card_pista._get_widget_scaling()))
+            except Exception:
+                escala = 1.0
+            ancho_logico = int(e.width / escala)
+            nuevo = int(round(min(720, max(240, ancho_logico - 36)) / 24.0) * 24)
             if abs(nuevo - self._ultimo_wrap_pista) >= 24:
                 self._ultimo_wrap_pista = nuevo
                 self.lbl_pista.configure(wraplength=nuevo)
 
-        def _ajustar_wrap_paso(e):
-            nuevo = int(round(max(220, e.width - 34) / 24.0) * 24)
-            if abs(nuevo - self._ultimo_wrap_paso) >= 24:
-                self._ultimo_wrap_paso = nuevo
-                self.lbl_texto_paso.configure(wraplength=nuevo)
-
         self.card_pista.bind("<Configure>", _ajustar_wrap_pista)
-        self.card_paso.bind("<Configure>", _ajustar_wrap_paso)
 
     def _refrescar_botones_skin(self) -> None:
         estrellas = self.motor.estrellas_totales

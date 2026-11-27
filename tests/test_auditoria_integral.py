@@ -1802,6 +1802,36 @@ class TestAuditoriaIntegralHaru(unittest.TestCase):
             except Exception:
                 pass
 
+    def test_22_dpi_scaling_wraplength_sin_desborde(self):
+        """Simula escala DPI 150% y verifica que el paso actual no entre en bucle de una línea."""
+        import customtkinter as ctk
+        from ui.app import VentanaPrincipalHaru
+
+        app = None
+        try:
+            ctk.set_widget_scaling(1.5)
+            app = VentanaPrincipalHaru(silenciar_audio_inicial=True)
+            app.update()
+            app.lbl_texto_paso.configure(
+                text=(
+                    "Primero, busca un lápiz lindo y lee juntos el primer ejercicio de suma "
+                    "con mucha calma paso a paso sin saltarte ningún renglón."
+                )
+            )
+            app.update()
+
+            self.assertEqual(app.lbl_texto_paso.cget("wraplength"), 260)
+            self.assertLessEqual(app.card_paso.winfo_width(), 520)
+            self.assertGreaterEqual(app.escenario_haru.winfo_width(), 250)
+            self.assertLessEqual(app.lbl_pista.cget("wraplength"), 720)
+        finally:
+            if app is not None:
+                try:
+                    app.cerrar_aplicacion()
+                except Exception:
+                    pass
+            ctk.set_widget_scaling(1.0)
+
 
 if __name__ == "__main__":
     unittest.main()
